@@ -9,6 +9,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "tests",
+        "vendor",
         "docs",
         "LICENSE",
         "README.md",

@@ -2,7 +2,7 @@
 
 ## 范围与实现边界
 
-[均匀介质模块](../src/medium.zig)提供无状态的吸收、自由程与方向分布计算；[独立测试](../src/medium_tests.zig)仅依赖纯 Zig，可直接使用 `zig test src/medium_tests.zig`，无需 C 链接。
+[均匀介质模块](../src/medium.zig)提供无状态的吸收、自由程与方向分布计算；[独立测试](../tests/medium_tests.zig)仅依赖纯 Zig，已并入 `zig build test`，无需单独链接图像 C 库。
 **模块本身**不负责场景求交或光源，但当前已由 [材质](../src/material.zig) 的 `Subsurface` / `newSubsurface`、
 [主积分器](../src/color.zig) 的 `rayColorLit`、[场景](../src/scene.zig) 和 [主程序](../src/main.zig) 实际接入。
 
@@ -185,8 +185,8 @@ $$
 
 这些期望通过确定性分层中点求积检验，避免随机测试偶发失败。这里的系数比是积分结果，不是额外路径乘数。
 单段参考不是完整平板多重散射解，也不能代替主积分器的闭合几何、多次散射、能量守恒和界面状态测试。
-介质测试已由 [主测试根](../src/tests.zig) 导入；场景测试检查实际材质、系数、几何分离和 CLI。
-[端到端测试](../src/subsurface_tests.zig) 另外覆盖实际弦长吸收、非单位方向、相机初始在内部、
+介质测试已由 [主测试根](../tests/tests.zig) 导入；场景测试检查实际材质、系数、几何分离和 CLI。
+[端到端测试](../tests/subsurface_tests.zig) 另外覆盖实际弦长吸收、非单位方向、相机初始在内部、
 分离的同材质物体、零介质与电介质逐路径一致性、散射能量守恒、独立随机游走参考、
 偏轴彩色发光、Fresnel/全反射、无重复 MIS 和轮盘补偿。
 测试及实际预览的结果见 [验证记录](validation.md)；通过测试不代表低样本图像收敛或模型已包含矿物纹理。

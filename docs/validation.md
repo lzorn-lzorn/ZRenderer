@@ -55,8 +55,8 @@ VS Code 按主测试文件运行时只报告该文件发现的 18 个测试；�
 | `git -c core.safecrlf=false diff --check` | 通过 |
 | 新增及修改的 Zig 源码编辑器诊断 | 未发现错误 |
 
-新增 [介质基础测试](../src/medium_tests.zig)、[水球几何测试](../src/water_tests.zig)、
-[体积积分端到端测试](../src/subsurface_tests.zig)，并扩展 [场景测试](../src/scene_tests.zig)。
+新增 [介质基础测试](../tests/medium_tests.zig)、[水球几何测试](../tests/water_tests.zig)、
+[体积积分端到端测试](../tests/subsurface_tests.zig)，并扩展 [场景测试](../tests/scene_tests.zig)。
 测试覆盖真实弦长吸收、非单位射线、相机初始在内部、分离的同材质物体、零介质退化、
 散射能量守恒、独立随机游走参考、偏轴彩色发光、全反射、轮盘补偿、无重复 MIS 和分配失败。
 水球验证解析极限、真正几何法线、位移边界、内部出射、自相交偏移、切线和最近根。

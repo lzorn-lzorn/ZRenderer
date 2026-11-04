@@ -1,13 +1,13 @@
 // @brief 独立验证主积分器的闭合介质输运；不以生产 BSDF 或介质公式生成解析参考。
 // @notice 所有随机测试使用固定预算及种子，不做自适应停止；只分配测试自身的场景。
 const std = @import("std");
-const math = @import("math.zig");
-const random = @import("random.zig");
-const material = @import("material.zig");
-const object = @import("object.zig");
-const texture = @import("texture.zig");
-const light = @import("light.zig");
-const color = @import("color.zig");
+const math = @import("zrenderer").math;
+const random = @import("zrenderer").random;
+const material = @import("zrenderer").material;
+const object = @import("zrenderer").object;
+const texture = @import("zrenderer").texture;
+const light = @import("zrenderer").light;
+const color = @import("zrenderer").color;
 const testing = std.testing;
 const Vec3 = math.Vec3;
 const Ray = math.Ray;

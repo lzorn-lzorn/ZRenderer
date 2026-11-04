@@ -90,6 +90,9 @@ $\sigma_a=(0.65,0.10,0.32)\,\mathrm{m}^{-1}$、$\sigma_s=4\,\mathrm{m}^{-1}$、$
 
 ## 3. 项目结构与对应类型
 
+手写源码位于 `src/`，回归测试位于 `tests/`，第三方 C 头文件与实现位于 `vendor/`。
+包根模块 [root](src/root.zig) 按名称重导出全部手写源模块，测试与外部调用方统一通过 `@import("zrenderer")` 访问。
+
 Zig 使用 `struct` 和带标签 `union`，没有传统继承式类。
 
 | 模块 | 主要类型/API | 职责 |
@@ -110,7 +113,7 @@ Zig 使用 `struct` 和带标签 `union`，没有传统继承式类。
 | [math](src/math.zig) | `Vec3`、`Ray`、`Onb`、`AabbRay` | 向量、坐标系和稳健包围盒 |
 | [random](src/random.zig)、[noise](src/noise.zig) | 线程局部 PRNG、`Perlin` | 路径随机数和程序纹理 |
 | [pdf](src/pdf.zig) | `Pdf` | 旧版余弦/形状/混合 PDF 兼容接口 |
-| [stb 接口](src/stb.zig)、[C 包装](src/stb_impl.c) | 外部图像函数 | 图片解码、PNG 编码 |
+| [stb 接口](src/stb.zig)、[C 包装](vendor/stb_impl.c) | 外部图像函数 | 图片解码、PNG 编码 |
 | [构建](build.zig) | build/run/test | Zig 与 stb C 构建，C 警告检查 |
 
 [Vulkan 绑定](src/vulkan.zig) 仅保留在仓库，当前不导入、不链接。
@@ -280,10 +283,10 @@ zig build test -Doptimize=ReleaseFast --summary all
 zig build test "-Dtest-filter=lighting"
 ```
 
-根测试 [tests](src/tests.zig) 汇总 [BSDF](src/bsdf_tests.zig)、[相机](src/camera_tests.zig)、
-[几何](src/geometry_tests.zig)、[光照](src/lighting_tests.zig)、[场景](src/scene_tests.zig)、
-[BVH](src/bvh_tests.zig)、[积分器](src/integrator_tests.zig)、[采样](src/sampling_tests.zig)、
-[介质](src/medium_tests.zig)、[SSS 端到端](src/subsurface_tests.zig) 和 [水球](src/water_tests.zig) 测试。
+根测试 [tests](tests/tests.zig) 汇总 [BSDF](tests/bsdf_tests.zig)、[相机](tests/camera_tests.zig)、
+[几何](tests/geometry_tests.zig)、[光照](tests/lighting_tests.zig)、[场景](tests/scene_tests.zig)、
+[BVH](tests/bvh_tests.zig)、[积分器](tests/integrator_tests.zig)、[采样](tests/sampling_tests.zig)、
+[介质](tests/medium_tests.zig)、[SSS 端到端](tests/subsurface_tests.zig) 和 [水球](tests/water_tests.zig) 测试。
 覆盖能量上界、互易性、独立数值求积、VNDF null 概率、TIR、折射权重、光源遮挡、
 相机对焦与实际曝光输出、OOM、线程一致性和 PNG 上下方向。
 统计测试固定种子和样本预算，有明确绝对误差容差，不把参考值直接取自被测 API。

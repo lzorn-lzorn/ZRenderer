@@ -1,7 +1,7 @@
 // @brief 均匀介质的独立解析与确定性分层测试；只导入纯 Zig 模块，不链接 C 库。
 const std = @import("std");
-const math = @import("math.zig");
-const Homogeneous = @import("medium.zig").Homogeneous;
+const math = @import("zrenderer").math;
+const Homogeneous = @import("zrenderer").medium.Homogeneous;
 const testing = std.testing;
 
 // @brief 逐通道比较颜色，不以亮度抵消通道误差。

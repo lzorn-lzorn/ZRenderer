@@ -1,10 +1,10 @@
 const std = @import("std");
-const math = @import("math.zig");
-const random = @import("random.zig");
-const bsdf = @import("bsdf.zig");
-const material = @import("material.zig");
-const object = @import("object.zig");
-const texture = @import("texture.zig");
+const math = @import("zrenderer").math;
+const random = @import("zrenderer").random;
+const bsdf = @import("zrenderer").bsdf;
+const material = @import("zrenderer").material;
+const object = @import("zrenderer").object;
+const texture = @import("zrenderer").texture;
 const testing = std.testing;
 const Vec3 = math.Vec3;
 const white = Vec3.init(1, 1, 1);

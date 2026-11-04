@@ -1,7 +1,7 @@
 # 胶囊、真实位移水球与带时间光源采样
 
 实现见 [object.zig](../src/object.zig) 与 [water.zig](../src/water.zig)，回归见
-[geometry_tests.zig](../src/geometry_tests.zig) 和 [water_tests.zig](../src/water_tests.zig)。
+[geometry_tests.zig](../tests/geometry_tests.zig) 和 [water_tests.zig](../tests/water_tests.zig)。
 
 ## 接口与所有权
 

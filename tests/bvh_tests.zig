@@ -1,9 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
-const math = @import("math.zig");
-const object = @import("object.zig");
-const material = @import("material.zig");
-const random = @import("random.zig");
+const math = @import("zrenderer").math;
+const object = @import("zrenderer").object;
+const material = @import("zrenderer").material;
+const random = @import("zrenderer").random;
 
 fn expectSameHit(expected: object.HitRecord, actual: object.HitRecord) !void {
     try testing.expectApproxEqAbs(expected.t, actual.t, 1e-12);

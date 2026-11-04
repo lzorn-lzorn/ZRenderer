@@ -2,10 +2,10 @@
 // @notice 不导入或修改主测试根；材质仅作为只读借用指针使用。
 const std = @import("std");
 const testing = std.testing;
-const math = @import("math.zig");
-const object = @import("object.zig");
-const material = @import("material.zig");
-const random = @import("random.zig");
+const math = @import("zrenderer").math;
+const object = @import("zrenderer").object;
+const material = @import("zrenderer").material;
+const random = @import("zrenderer").random;
 const Vec3 = math.Vec3;
 const Ray = math.Ray;
 

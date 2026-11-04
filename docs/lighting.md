@@ -2,7 +2,7 @@
 
 本说明对应 [light.zig](../src/light.zig)、[color.zig](../src/color.zig) 与
 [render.zig](../src/render.zig)，回归测试位于
-[lighting_tests.zig](../src/lighting_tests.zig)，已由主测试根导入。
+[lighting_tests.zig](../tests/lighting_tests.zig)，已由主测试根导入。
 
 ## 1. 接口与测度
 
@@ -318,8 +318,8 @@ $\rho\times0.4\times2^{EV}$，独立计算 gamma=2.2 编码；不调用生产
 
 ## 8. 验证记录
 
-光照测试可独立运行 `zig test src/lighting_tests.zig src/stb_impl.c -lc -I src`，
-或追加 `-O ReleaseSafe` / `-O ReleaseFast`；主测试根也已导入该模块。
-上述参考和预算说明表面光照测试的设计；新体积积分另由 [端到端测试](../src/subsurface_tests.zig)
+光照测试可独立运行 `zig build test -Dtest-filter=lighting`，
+或追加 `-Doptimize=ReleaseSafe` / `-Doptimize=ReleaseFast`；主测试根也已导入该模块。
+上述参考和预算说明表面光照测试的设计；新体积积分另由 [端到端测试](../tests/subsurface_tests.zig)
 检查跨界状态、独立随机游走参考、全反射、MIS 不重复加权和轮盘补偿。
 完整测试及本轮图像检查见 [验证记录](validation.md)。

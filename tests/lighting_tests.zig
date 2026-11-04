@@ -1,13 +1,13 @@
 const std = @import("std");
-const math = @import("math.zig");
-const random = @import("random.zig");
-const object = @import("object.zig");
-const material = @import("material.zig");
-const texture = @import("texture.zig");
-const light = @import("light.zig");
-const color = @import("color.zig");
-const camera = @import("camera.zig");
-const render = @import("render.zig");
+const math = @import("zrenderer").math;
+const random = @import("zrenderer").random;
+const object = @import("zrenderer").object;
+const material = @import("zrenderer").material;
+const texture = @import("zrenderer").texture;
+const light = @import("zrenderer").light;
+const color = @import("zrenderer").color;
+const camera = @import("zrenderer").camera;
+const render = @import("zrenderer").render;
 const testing = std.testing;
 const Vec3 = math.Vec3;
 const white = Vec3.init(1, 1, 1);
@@ -430,7 +430,7 @@ test "lighting renderPixels NEE physical camera is schedule deterministic includ
     const distant = [_]light.DistantLight{.{ .direction = .{ .x = 1, .y = -1 }, .radiance = white.scale(0.2) }};
     const cam = try (camera.PhysicalCameraArgs{ .lookfrom = .{ .y = 1, .z = 3 }, .lookat = .{}, .focus_distance = 3, .exposure_compensation = -2, .sensor_cos4_vignetting = true }).build();
     for ([_]bool{ false, true }) |adaptive| {
-        for ([_]@import("sampling.zig").Sampler{ .random, .sobol }) |sampler| {
+        for ([_]@import("zrenderer").sampling.Sampler{ .random, .sobol }) |sampler| {
             var reference_stats: render.RenderStats = .{};
             var params = render.RenderParams{
                 .cam = cam,

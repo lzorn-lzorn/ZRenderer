@@ -1,10 +1,10 @@
 const std = @import("std");
-const math = @import("math.zig");
-const random = @import("random.zig");
-const object = @import("object.zig");
-const material = @import("material.zig");
-const texture = @import("texture.zig");
-const color = @import("color.zig");
+const math = @import("zrenderer").math;
+const random = @import("zrenderer").random;
+const object = @import("zrenderer").object;
+const material = @import("zrenderer").material;
+const texture = @import("zrenderer").texture;
+const color = @import("zrenderer").color;
 const testing = std.testing;
 
 fn plane(alloc: std.mem.Allocator, mat: *material.Material) !*object.BvhNode {

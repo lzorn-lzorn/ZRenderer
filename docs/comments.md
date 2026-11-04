@@ -22,10 +22,10 @@
 
 ## 例外
 
-- 第三方头文件 [../src/stb_image.h](../src/stb_image.h) 和 [../src/stb_image_write.h](../src/stb_image_write.h) 保持上游原文，不翻译或重排。
+- 第三方头文件 [../vendor/stb_image.h](../vendor/stb_image.h) 和 [../vendor/stb_image_write.h](../vendor/stb_image_write.h) 保持上游原文，不翻译或重排。
 - 自动生成的 [../src/vulkan.zig](../src/vulkan.zig) 保持生成器输出，不手工修改。
 - [../LICENSE](../LICENSE) 以及任何源文件内的版权、许可、归属声明均逐字保留；即使语言或格式与本约定不同也不改写。
-- 手写接口 [../src/stb.zig](../src/stb.zig) 和实现宏包装 [../src/stb_impl.c](../src/stb_impl.c) 不是第三方内容例外，仍遵守中文标签约定。
+- 手写接口 [../src/stb.zig](../src/stb.zig) 和实现宏包装 [../vendor/stb_impl.c](../vendor/stb_impl.c) 不是第三方内容例外，仍遵守中文标签约定。
 
 ## 检查方式
 

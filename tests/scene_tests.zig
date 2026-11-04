@@ -1,9 +1,9 @@
 const std = @import("std");
-const scene = @import("scene.zig");
-const main = @import("main.zig");
-const math = @import("math.zig");
-const object = @import("object.zig");
-const color = @import("color.zig");
+const scene = @import("zrenderer").scene;
+const main = @import("zrenderer").main;
+const math = @import("zrenderer").math;
+const object = @import("zrenderer").object;
+const color = @import("zrenderer").color;
 const testing = std.testing;
 
 // @brief 小毛束场景验证实际 PBR 类型、光源注册和可复现的几何，而非仅测试构造函数。

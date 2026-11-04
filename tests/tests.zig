@@ -1,11 +1,11 @@
 const std = @import("std");
-const math = @import("math.zig");
-const random = @import("random.zig");
-const camera = @import("camera.zig");
-const material = @import("material.zig");
-const texture = @import("texture.zig");
-const object = @import("object.zig");
-const render = @import("render.zig");
+const math = @import("zrenderer").math;
+const random = @import("zrenderer").random;
+const camera = @import("zrenderer").camera;
+const material = @import("zrenderer").material;
+const texture = @import("zrenderer").texture;
+const object = @import("zrenderer").object;
+const render = @import("zrenderer").render;
 const testing = std.testing;
 
 test {
@@ -37,7 +37,7 @@ fn refAllDeclsRecursive(comptime T: type) void {
 }
 
 test "all handwritten public declarations compile" {
-    inline for (.{ math, random, camera, material, texture, object, render, @import("bsdf.zig"), @import("light.zig"), @import("sampling.zig"), @import("color.zig"), @import("noise.zig"), @import("pdf.zig"), @import("stb.zig"), @import("main.zig") }) |module| {
+    inline for (.{ math, random, camera, material, texture, object, render, @import("zrenderer").bsdf, @import("zrenderer").light, @import("zrenderer").sampling, @import("zrenderer").color, @import("zrenderer").noise, @import("zrenderer").pdf, @import("zrenderer").stb, @import("zrenderer").main }) |module| {
         refAllDeclsRecursive(module);
     }
 }
@@ -122,7 +122,7 @@ test "BVH rejects empty and invalid ranges" {
 }
 
 test "Perlin noise handles negative coordinates" {
-    const noise = @import("noise.zig").Perlin.init();
+    const noise = @import("zrenderer").noise.Perlin.init();
     const p = math.Point3.init(-1.25, -3.5, -8.75);
     try testing.expect(std.math.isFinite(noise.noise(p)));
     try testing.expect(std.math.isFinite(noise.turb(p, 7)));
@@ -361,7 +361,7 @@ test "render rejects unsafe dimensions and scheduling parameters" {
 }
 
 test "thread command line options validate input" {
-    const Options = @import("main.zig").Options;
+    const Options = @import("zrenderer").main.Options;
     try testing.expectEqual(@as(usize, 0), (try Options.parse(&.{})).thread_count);
     try testing.expectEqual(@as(usize, 8), (try Options.parse(&.{ "--threads", "8" })).thread_count);
     try testing.expectEqual(@as(usize, 0), (try Options.parse(&.{ "--threads", "0" })).thread_count);
@@ -417,7 +417,7 @@ test "adaptive samples and pixels are independent of thread scheduling" {
     params.relative_error = 0.1;
     var stats: render.RenderStats = .{};
     params.stats = &stats;
-    for ([_]@import("sampling.zig").Sampler{ .sobol, .random }) |mode| {
+    for ([_]@import("zrenderer").sampling.Sampler{ .sobol, .random }) |mode| {
         params.sampler = mode;
         params.thread_count = 1;
         params.rows_per_task = 8;
@@ -434,14 +434,14 @@ test "adaptive samples and pixels are independent of thread scheduling" {
 }
 
 test "sampling options reject invalid values and keep the configured large default" {
-    const Options = @import("main.zig").Options;
+    const Options = @import("zrenderer").main.Options;
     try testing.expectEqual(@as(i32, 8640), (try Options.parse(&.{})).image_width);
     const options = try Options.parse(&.{ "--width", "320", "--samples", "64", "--sampler", "random", "--no-adaptive", "--rr-depth", "7", "--output", "test.png" });
     try testing.expectEqual(@as(i32, 320), options.image_width);
     try testing.expectEqual(@as(i32, 64), options.samples);
     try testing.expectEqual(@as(i32, 7), options.min_bounce);
     try testing.expect(!options.adaptive);
-    try testing.expectEqual(@import("sampling.zig").Sampler.random, options.sampler);
+    try testing.expectEqual(@import("zrenderer").sampling.Sampler.random, options.sampler);
     try testing.expectError(error.InvalidSampler, Options.parse(&.{ "--sampler", "invalid" }));
     try testing.expectError(error.InvalidTolerance, Options.parse(&.{ "--relative-error", "nan" }));
     try testing.expectError(error.InvalidTolerance, Options.parse(&.{ "--absolute-error", "-0.1" }));

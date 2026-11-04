@@ -88,7 +88,7 @@ $$
 
 ## 独立验证
 
-按要求独立编译运行：`zig test src/water_tests.zig src/stb_impl.c -lc -I src`。不依赖整个应用构建，也不改动现有总测试入口。
+按要求独立运行：`zig build test -Dtest-filter=water`（水球测试名均以 "water:" 开头）。
 
 九组测试覆盖：
 

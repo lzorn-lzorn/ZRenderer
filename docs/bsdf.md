@@ -330,12 +330,12 @@ PBR、薄层和 `Subsurface` 只在新 BSDF 接口工作，旧散射接口返回
 新接口明确返回黑色、零密度、`null`，`hasNonDelta=false`；其旧体散射方法保留。
 新体积路径已通过 `medium.Homogeneous` 的 HG 契约直接接入积分器，不借用旧 `Isotropic` 表面接口。
 
-[测试集](../src/bsdf_tests.zig) 覆盖世界空间 sample/eval/pdf 一致性、掠射有限值、反射白炉、
+[测试集](../tests/bsdf_tests.zig) 覆盖世界空间 sample/eval/pdf 一致性、掠射有限值、反射白炉、
 互易性、VNDF 经验分箱与包含 null 的归一化、漫反射/漫透射端点和概率抵消、
 镜面常量权重、精确 Fresnel、水的进入/离开 eta²、Snell 与全反射、非法参数和逐次分配失败。
 另有独立解析的 GGX 双瓣 f/pdf、多个粗糙度的法向接受率、逐通道镜面/漫反射预算求积、
 跨界面往返折射、极高 IOR 的小角度回归、直接构造闭包与后续参数修改的非法输入检查。
-测试文件可独立编译，也已由 [主测试根](../src/tests.zig) 导入；当前通过状态以本轮实际测试输出为准。
+测试已由 [主测试根](../tests/tests.zig) 导入；当前通过状态以本轮实际测试输出为准。
 统计测试固定随机种子；白炉采样与数值求积留有统计/离散化容差，数学能量保证来自上面的证明。
 粗糙度下限的尖峰由解析检查和 VNDF 采样覆盖，不依赖均匀角度网格解析该尖峰。
-可独立执行 `zig test src/bsdf_tests.zig src/stb_impl.c -lc -I src`，并加 `-O ReleaseSafe` 或 `-O ReleaseFast`。
+可独立执行 `zig build test -Dtest-filter=BSDF`，并加 `-Doptimize=ReleaseSafe` 或 `-Doptimize=ReleaseFast`。

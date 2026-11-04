@@ -1,7 +1,7 @@
 const std = @import("std");
-const sampling = @import("sampling.zig");
-const camera = @import("camera.zig");
-const math = @import("math.zig");
+const sampling = @import("zrenderer").sampling;
+const camera = @import("zrenderer").camera;
+const math = @import("zrenderer").math;
 const testing = std.testing;
 
 test "Sobol starts with known Gray-code points" {

@@ -1,0 +1,20 @@
+// @brief 包根模块：按名称重导出全部手写源模块，供测试与外部调用方以 @import("zrenderer") 访问。
+// @notice 生成绑定 vulkan.zig 不在此列，保持生成器输出、按需导入；stb_impl.c 的链接由构建脚本负责。
+pub const bsdf = @import("bsdf.zig");
+pub const camera = @import("camera.zig");
+pub const color = @import("color.zig");
+pub const light = @import("light.zig");
+pub const main = @import("main.zig");
+pub const material = @import("material.zig");
+pub const math = @import("math.zig");
+pub const medium = @import("medium.zig");
+pub const noise = @import("noise.zig");
+pub const object = @import("object.zig");
+pub const pdf = @import("pdf.zig");
+pub const random = @import("random.zig");
+pub const render = @import("render.zig");
+pub const sampling = @import("sampling.zig");
+pub const scene = @import("scene.zig");
+pub const stb = @import("stb.zig");
+pub const texture = @import("texture.zig");
+pub const water = @import("water.zig");
