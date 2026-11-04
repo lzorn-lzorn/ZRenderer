@@ -6,12 +6,14 @@ const Point3 = math.Point3;
 
 const point_count = 256;
 
+// @brief 使用梯度表及三张置换表的三维 Perlin 梯度噪声。
 pub const Perlin = struct {
     ranvec: [point_count]Vec3 = undefined,
     perm_x: [point_count]u8 = undefined,
     perm_y: [point_count]u8 = undefined,
     perm_z: [point_count]u8 = undefined,
 
+    // @brief 消耗当前线程随机序列，建立梯度及置换表。
     pub fn init() Perlin {
         var self: Perlin = undefined;
         var i: usize = 0;
@@ -24,6 +26,8 @@ pub const Perlin = struct {
         return self;
     }
 
+    // @brief 在空间位置 p 对八个格点的梯度投影作平滑插值。
+    // @notice 坐标取整后须可表示为 i32；格点索引按 256 循环。
     pub fn noise(self: Perlin, p: Point3) f64 {
         const u = p.x - @floor(p.x);
         const v = p.y - @floor(p.y);
@@ -50,6 +54,9 @@ pub const Perlin = struct {
         return perlinInterp(c, u, v, w);
     }
 
+    // @brief 叠加频率逐倍、权重逐半的噪声层，再取绝对值。
+    // @param depth 叠加层数；非正值返回零。
+    // @method **分层叠加**：$T(\mathbf{p})=|\sum_{i=0}^{depth-1}2^{-i}N(2^i\mathbf{p})|$。
     pub fn turb(self: Perlin, p: Point3, depth: i32) f64 {
         var accum: f64 = 0.0;
         var temp_p = p;
@@ -84,6 +91,7 @@ fn permute(p: []u8, n: usize) void {
     }
 }
 
+// @brief 按平滑三线性权重混合八个格点梯度与位移的点积。
 fn perlinInterp(c: [2][2][2]Vec3, u: f64, v: f64, w: f64) f64 {
     const uu = fade(u);
     const vv = fade(v);
@@ -110,6 +118,7 @@ fn perlinInterp(c: [2][2][2]Vec3, u: f64, v: f64, w: f64) f64 {
     return accum;
 }
 
+// @method **平滑权重**：$f(x)=6x^5-15x^4+10x^3$，端点一阶与二阶导数均为零。
 fn fade(x: f64) f64 {
     return x * x * x * (x * (x * 6 - 15) + 10);
 }

@@ -53,7 +53,7 @@ test "AABB intervals handle reverse rays, grazing, clipping, and tiny directions
     const tangent = box.interval(grazing, 0, math.infinity).?;
     try testing.expectEqual(@as(f64, 1), tangent.entry);
     try testing.expectEqual(tangent.entry, tangent.exit);
-    // A reciprocal can overflow even though the direction is not zero.
+    // @notice 即使方向非零，其倒数仍可能溢出。
     for ([_]f64{ 1e-310, -1e-310 }) |tiny| {
         const ray = math.Ray.init(.{ .x = if (tiny > 0) 0 else 1, .y = 0.5, .z = -1 }, .{ .x = tiny, .z = 1 }, 0);
         const interval = box.interval(ray, 0, math.infinity).?;
@@ -102,7 +102,7 @@ test "BVH nearest hits match group including motion, UVs, misses, and bounded in
                 }
             }
         }
-        // Non-axis-aligned rays aimed at the actual moving centers.
+        // @notice 使用非轴对齐射线，瞄准当前时刻实际移动后的球心。
         for (group.list.items) |item| {
             const origin = math.Point3.init(7, 4, -10);
             const ray = math.Ray.init(origin, item.sphere.center(time).sub(origin), time);
@@ -180,7 +180,7 @@ test "BVH falls back after near box misses primitive and retains endpoint hits" 
     try testing.expect(node.hit(ray, 0, 7, &actual));
     try expectSameHit(expected, actual);
     try testing.expect(!node.hit(ray, 0, 6.99, &actual));
-    // The tangent is on a parallel slab boundary and exactly at tmax.
+    // @notice 切点位于平行夹层边界，且射线参数恰好等于 tmax。
     const tangent = math.Ray.init(.{ .x = 1, .z = -3 }, .{ .z = 1 }, 0);
     try testing.expect(near.hit(tangent, 0, 3, &expected));
     try testing.expect(node.hit(tangent, 0, 3, &actual));
@@ -222,7 +222,7 @@ test "BVH missing bounds fail before sorting, including wrapped objects and subr
         try testing.expectError(error.MissingBoundingBox, object.BvhNode.init(testing.allocator, &.{ &valid, bad }, 0, 2, 0, 1));
         try testing.expectError(error.MissingBoundingBox, object.BvhNode.init(testing.allocator, &.{ &valid, &valid, bad, &valid, &valid }, 0, 5, 0, 1));
     }
-    // Objects outside the requested range are not consulted or retained.
+    // @notice 请求范围外的对象既不参与查询，也不被构建结果持有。
     const node = try object.BvhNode.init(testing.allocator, &.{ &missing, &valid, &wrapped }, 1, 2, 0, 1);
     defer testing.allocator.destroy(node);
     try testing.expect(node.left == &valid and node.right == &valid);
@@ -248,7 +248,7 @@ test "BVH split uses longest centroid extent without consuming random samples" {
     try testing.expectEqualDeep(bounds, node.right_box);
 }
 
-// Only destroy builder-owned nodes/wrappers, never borrowed input objects.
+// @notice 只销毁构建器拥有的节点和包装，绝不销毁借用的输入对象。
 fn freeTestTree(alloc: std.mem.Allocator, node: *object.BvhNode, count: usize) void {
     if (count > 2) {
         freeTestTree(alloc, node.left.bvh, count / 2);

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// @brief 配置可执行程序、运行步骤及回归测试，共享 stb C 实现和 libc 链接。
+// @param b Zig 构建图上下文，提供目标平台、优化模式及测试过滤选项。
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -11,7 +13,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // Compile the stb single-header C implementation for PNG output / image loading.
+    // @brief 编译 stb 单头文件 C 实现，用于 PNG 输出及图像加载。
     const c_flags = &.{ "-Wall", "-Wextra", "-Wpedantic" };
     exe_mod.addCSourceFile(.{ .file = b.path("src/stb_impl.c"), .flags = c_flags });
 

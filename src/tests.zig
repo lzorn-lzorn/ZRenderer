@@ -12,9 +12,14 @@ test {
     _ = @import("bvh_tests.zig");
     _ = @import("integrator_tests.zig");
     _ = @import("sampling_tests.zig");
+    _ = @import("bsdf_tests.zig");
+    _ = @import("camera_tests.zig");
+    _ = @import("geometry_tests.zig");
+    _ = @import("lighting_tests.zig");
+    _ = @import("scene_tests.zig");
 }
 
-// Zig analyzes declarations lazily. Check unused public APIs as well as main.
+// @notice Zig 按需分析声明；除入口外，还检查未被使用的公共接口。
 fn refAllDeclsRecursive(comptime T: type) void {
     testing.refAllDecls(T);
     inline for (comptime std.meta.declarations(T)) |name| {
@@ -29,7 +34,7 @@ fn refAllDeclsRecursive(comptime T: type) void {
 }
 
 test "all handwritten public declarations compile" {
-    inline for (.{ math, random, camera, material, texture, object, render, @import("sampling.zig"), @import("color.zig"), @import("noise.zig"), @import("pdf.zig"), @import("stb.zig"), @import("main.zig") }) |module| {
+    inline for (.{ math, random, camera, material, texture, object, render, @import("bsdf.zig"), @import("light.zig"), @import("sampling.zig"), @import("color.zig"), @import("noise.zig"), @import("pdf.zig"), @import("stb.zig"), @import("main.zig") }) |module| {
         refAllDeclsRecursive(module);
     }
 }
@@ -219,7 +224,7 @@ test "parallel render is byte identical across thread counts and row blocks" {
     defer testing.allocator.free(reference);
     try testing.expectEqual(@as(usize, 17 * 19 * 3), reference.len);
 
-    // Odd image dimensions exercise partial final blocks and excess workers.
+    // @notice 奇数图像尺寸用于覆盖末尾不完整任务块和工作线程过多的情况。
     for ([_]usize{ 1, 2, 4, 128, 0 }) |thread_count| {
         for ([_]usize{ 1, 3, 8, 128 }) |rows_per_task| {
             params.thread_count = thread_count;
@@ -276,7 +281,7 @@ test "parallel PNG covers every row with red above blue" {
     try testing.expect(image.data != null);
     try testing.expectEqual(@as(i32, 5), image.width);
     try testing.expectEqual(@as(i32, 6), image.height);
-    // Inspect raw PNG rows, not ImageTexture.value(), which flips UV v.
+    // @notice 检查 PNG 原始行而非 ImageTexture.value()，后者会翻转纹理纵坐标 v。
     for (0..6) |row| {
         for (0..5) |column| {
             const offset = (row * 5 + column) * 3;
@@ -391,7 +396,7 @@ test "adaptive rendering stops constant pixels early without changing normalizat
     try testing.expectEqualSlices(u8, fixed, adaptive);
     params.adaptive = true;
     params.min_samples = 256;
-    params.samples_per_pixel = 35; // Budget need not be a complete replica block.
+    params.samples_per_pixel = 35; // @notice 样本预算不必恰好覆盖完整副本块。
     const capped = try render.renderPixels(testing.allocator, params, scene.bvh, null);
     defer testing.allocator.free(capped);
     try testing.expectEqual(@as(u64, 17 * 19 * 35), stats.total_samples);

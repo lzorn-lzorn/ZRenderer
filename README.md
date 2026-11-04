@@ -1,132 +1,251 @@
 # ZRenderer
 
-A CPU path tracer written in Zig **0.17**, verified with **0.17.1** on Windows.
-It renders a random sphere scene with diffuse, metal and dielectric materials,
-using a BVH for acceleration, and saves the result as `random_scene.png`.
+使用 **Zig 0.17** 编写的 CPU 路径追踪器，在 Windows / Zig **0.17.1** 上验证。
+采用统一 BSDF、GGX 微表面、物理参数薄透镜、直接光照采样和 MIS，输出随机球场景的 PNG。
+当前构建不使用 GPU，不需要 Vulkan SDK；stb 的 C 实现随项目编译。
 
-## Requirements
+## 1. 构建与运行
 
-- Zig 0.17 on `PATH` (tested with 0.17.1).
-- No additional packages or Vulkan SDK are needed for the current renderer.
-  The bundled stb C implementation is compiled and linked by the build script.
-
-## Build & run
+将 Zig 加入 PATH 后，在项目根目录执行：
 
 ```powershell
 zig build
-zig build run -Doptimize=ReleaseFast -- --width 600
+zig build run -Doptimize=ReleaseFast -- --width 640 --samples 128
 ```
 
-The executable is installed to `zig-out/bin/`. The configured default width is
-**8640** (8640x4860 at 16:9), with a maximum of 100 samples per pixel. This is a
-large render: use `--width 600` for previews. Progress, actual average samples
-per pixel, PNG encoding status and elapsed time are written to stderr.
-
-### Parallel rendering
-
-Rendering defaults to the available logical CPU count, capped by the number of
-row blocks. Workers dynamically claim blocks of 8 rows and write disjoint parts
-of one RGB buffer. The main thread also renders; PNG encoding happens once after
-all workers finish. Scene construction and PNG encoding remain single-threaded.
+默认宽度仍为 **8640**，对应 **8640×4860**，不是 15360×8640 的标准 16K UHD。
+默认最多 100 spp，预览必须显式降低宽度；Debug 构建不适合性能比较。
+默认输出文件名是 random_scene.png，相对路径相对于**进程工作目录**。
+仅构建不会渲染；`--output` 可指定完整输出路径，但父目录必须已存在。
+生成程序安装于 zig-out/bin 目录。`--help` 只输出帮助，不构建场景。
 
 ```powershell
-zig build run -Doptimize=ReleaseFast -- --width 600 --threads 8
-zig build run -Doptimize=ReleaseFast -- --width 600 --threads 1
-zig build run -Doptimize=ReleaseFast -- --width 600 --threads 0
+zig build run -Doptimize=ReleaseFast -- --width 640 --samples 128 --output preview.png
+zig build run -Doptimize=ReleaseFast -- --width 640 --samples 256 --no-adaptive --threads 1
+zig build run -Doptimize=ReleaseFast -- --width 640 --f-number 2.8 --iso 100 --exposure -3
 ```
 
-`--threads 0` selects automatically; `--threads 1` provides a serial baseline.
-Use an optimized build for performance comparisons, not the default Debug build.
-`--help` prints usage without rendering. Relative output paths remain relative
-to the working directory; the default output is still `random_scene.png`.
+### 渲染与相机参数
 
-Each native thread has its own RNG. Sampling is now keyed by pixel and sample
-index, so early stopping in one pixel cannot change a neighbor's samples.
-The same scene, render seed and settings produce identical pixels and sample
-counts regardless of worker count or block scheduling (within the same build).
-`RenderParams` also exposes `rows_per_task` and `seed` for programmatic control.
-The scene, materials and textures must not be mutated during a render.
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `--width N` | 8640 | 图像宽度，传感器宽高比 16:9，最小 4 |
+| `--samples N` | 100 | 每像素最大预算，不向上取整 |
+| `--threads N` | 0 | 0 自动，1 仅调用线程，其余为线程上限 |
+| `--sampler sobol\|random` | sobol | 相机五维采样 |
+| `--no-adaptive` | 未启用 | 固定预算，参考图建议使用 |
+| `--min-samples N` | 16 | 自适应最早检查门槛，默认最早停止在 32 spp |
+| `--relative-error E` | 0.05 | 线性 RGB 相对阈值，不是误差保证 |
+| `--absolute-error E` | 0.002 | 线性 RGB 绝对阈值 |
+| `--rr-depth N` | 5 | 第 N 次散射之后开始轮盘，不是最大深度 |
+| `--output FILE` | random_scene.png | PNG 路径，父目录必须存在 |
+| `--focal-length MM` | 50 | 镜头焦距，毫米 |
+| `--f-number N` | 8 | 光圈数；改变景深和曝光 |
+| `--focus-distance M` | 13.3 | 沿光轴的对焦距离，米，必须大于焦距 |
+| `--shutter SECONDS` | 0.008 | 快门持续时间，主场景限制在 $(0,1]$ 秒 |
+| `--iso N` | 100 | 相对传感器增益，不模拟噪声 |
+| `--exposure EV` | 0 | 显示前线性曝光补偿，允许负值 |
+| `--fur-strands N` | 1800 | 大绒毛球毛束数，0 关闭细毛；当前最多 100000 |
 
-## Integration and sampling
+增大毛束数会显著增加几何数量和 BVH 构建成本；每束使用两个胶囊体。
+快门采样以秒为单位，场景运动区间与 BVH 均为 [0,1] 秒，禁止超出该区间。
 
-The main integrator is iterative. It accumulates radiance and path throughput,
-starting throughput-dependent Russian roulette after 5 scattering events by
-default (`--rr-depth`). Surviving paths are divided by their actual survival
-probability; paths before roulette are no longer incorrectly amplified by 1/rr.
-The `rr` parameter caps survival at 0.9 by default. There is no hard bounce cap.
-Existing legacy `rayColorWith*` routines are not the optimized render path.
+## 2. 示例场景与实现边界
 
-BVH construction caches bounds once and chooses the longest centroid axis for
-a deterministic median split. Traversal tests singleton leaves once, visits the
-nearer child first and shares precomputed reciprocal directions. Parallel rays
-and grazing box hits are handled explicitly. This is not a full SAH/flat-BVH rewrite.
+[scene.loadRandomScene()](src/scene.zig) 保留棋盘地面和随机小球阵列，添加三颗展示球。
+默认视角中从左至右为**绒毛、玉石近似、水球**；部分随机小球也使用这些材质。
+其余小球使用不同金属度和粗糙度的 PBR 或光滑玻璃。大面积顶灯提供可采样高光。
 
-Camera sampling defaults to digitally shifted Sobol in five dimensions: film
-x/y, lens x/y and shutter time. The lens uses a concentric square-to-disk map,
-not rejection sampling. Later scattering and roulette still use the independent
-per-sample PRNG; this is **not** a full-path Sobol or Owen-scrambled integrator.
-Unshifted Sobol coordinates are shared in a bounded read-only cache (at most
-80 KiB), with separate shifts for each pixel and replica.
+| 对象 | 实际实现 | 不包含 |
+| --- | --- | --- |
+| 水球 | IOR=1.333，精确非偏振 Fresnel、全反射、带 $\eta^2$ 的光滑折射 | 流体模拟、波浪、光谱吸收、嵌套介质 |
+| 玉石近似球 | 绿色的能量有界漫反射/漫透射 BSDF，两半球混合 | 真正 BSSRDF、内部随机游走、厚度相关散射；不宣称真实玉石体散射 |
+| 绒毛球 | 两段胶囊组成的弯曲细毛，真实轮廓和阴影，粗糙 GGX 表面 | 专用毛发 BSDF、纤维内部反射折射、毛发动力学 |
+| 粗糙金属/塑料 | GGX + Smith + Schlick，保守互易漫反射能量预算 | 完整 glTF/Disney 兼容、多次微表面散射补偿、复杂涂层 |
 
-Adaptive sampling is on by default. `--samples` is a hard sample budget, not a
-minimum. Eight independent randomized replicas estimate linear RGB error from
-their means. Complete power-of-two blocks are checked (16,32,64,... total), and
-two consecutive checks must pass: default settings cannot stop before 32 samples.
-Budgets below that simply render all requested samples. The sample budget is
-never rounded up, even when it is not a multiple of eight.
+玉球是表面透射的外观近似，不能替代真实次表面渲染；低样本图中的透射噪声不是细节贴图。
+
+## 3. 项目结构与对应类型
+
+Zig 使用 `struct` 和带标签 `union`，没有传统继承式类。
+
+| 模块 | 主要类型/API | 职责 |
+| --- | --- | --- |
+| [main](src/main.zig) | `Options.parse`、`main` | 参数、物理相机、运行与输出 |
+| [scene](src/scene.zig) | `loadRandomScene`、`addFur` | 示例材质、几何和灯光装配 |
+| [render](src/render.zig) | `Scene`、`RenderParams`、`renderPixels`、`renderImage` | 场景容器、工作线程、像素累积和 PNG |
+| [camera](src/camera.zig) | `PhysicalCameraArgs`、`Camera` | 薄透镜射线、快门、相对曝光 |
+| [material](src/material.zig) | `Material`、`Pbr`、`Translucent` | 材质参数验证和 BSDF 适配 |
+| [bsdf](src/bsdf.zig) | `Surface`、`Sample` | `eval/pdf/sample`、GGX VNDF、Fresnel |
+| [light](src/light.zig) | `Sampler`、`PointLight`、`DistantLight` | 选光概率、方向 PDF、MIS 权重 |
+| [color](src/color.zig) | `rayColorLit`、`spawnRay`、`writeColor` | 传输、NEE、MIS、轮盘与显示编码 |
+| [object](src/object.zig) | `Object`、`HitRecord`、`Sphere`、`Capsule`、`BvhNode` | 相交、运动、几何采样、加速结构 |
+| [texture](src/texture.zig) | `Texture`、`ImageTexture` | 常量、棋盘、Perlin、8 位图片 |
+| [sampling](src/sampling.zig) | `PixelSampler`、`Estimate` | Sobol 随机数字平移、自适应估计 |
+| [math](src/math.zig) | `Vec3`、`Ray`、`Onb`、`AabbRay` | 向量、坐标系和稳健包围盒 |
+| [random](src/random.zig)、[noise](src/noise.zig) | 线程局部 PRNG、`Perlin` | 路径随机数和程序纹理 |
+| [pdf](src/pdf.zig) | `Pdf` | 旧版余弦/形状/混合 PDF 兼容接口 |
+| [stb 接口](src/stb.zig)、[C 包装](src/stb_impl.c) | 外部图像函数 | 图片解码、PNG 编码 |
+| [构建](build.zig) | build/run/test | Zig 与 stb C 构建，C 警告检查 |
+
+[Vulkan 绑定](src/vulkan.zig) 仅保留在仓库，当前不导入、不链接。
+
+### 运行流程
+
+```mermaid
+flowchart TD
+    A[命令行验证] --> B[物理相机构造]
+    B --> C[场景与 PBR 材质]
+    C --> D[BVH 构建]
+    D --> E[线程领取行块]
+    E --> F[逐像素逐样本设置随机流]
+    F --> G[Sobol 胶片 / 镜头 / 快门]
+    G --> H[相机射线]
+    H --> I[rayColorLit: 发光 + NEE + BSDF + MIS + 轮盘]
+    I --> J[乘相机曝光权重]
+    J --> K[线性 RGB 累积与自适应检查]
+    K --> L[按实际样本数平均并显示编码]
+    L --> M[所有线程 join]
+    M --> N[一次 PNG 编码]
+```
+
+场景使用 arena；渲染期间几何、材质、灯光切片和纹理必须只读且存活。
+工作线程写互不重叠的行，没有逐像素锁。线程启动失败时先取消并 join，之后才能释放上下文。
+`renderPixels` 返回调用者拥有的 RGB 字节缓冲；`renderImage` 负责释放自己的缓冲。
+stb 图片不属于 Zig arena，需要调用 `ImageTexture.deinit()` 释放。
+
+## 4. BSDF 数学与调用契约
+
+渲染方程的表面部分为
+
+$$
+L_o(x,\omega_o)=L_e(x,\omega_o)+\int_{S^2}f_s(\omega_o,\omega_i)L_i(x,\omega_i)|n\cdot\omega_i|\,d\omega_i.
+$$
+
+两方向均从交点向外。BSDF 值不包含余弦，PDF 是立体角密度。连续样本通量更新为
+
+$$
+\beta' = \beta\frac{f_s(\omega_o,\omega_i)|n\cdot\omega_i|}{p_B(\omega_i)}.
+$$
+
+`Material.bsdfEval` 返回完整 RGB BSDF，`bsdfPdf` 返回所有瓣的混合 PDF，
+`bsdfSample` 返回已计算好上述比值的 `Sample.weight`。**积分器不能再次除以 PDF。**
+理想镜面/折射为 delta：`is_delta=true`，`pdf` 为离散分支概率，不与连续 PDF 比较。
+
+微表面反射为
+
+$$
+f_r=\frac{D(h)F(\omega_o,h)G_1(\omega_o)G_1(\omega_i)}{4|n\cdot\omega_o||n\cdot\omega_i|},
+\quad \alpha=\max(0.001,roughness^2).
+$$
+
+GGX 可见法线采样使用雅可比 $p_B(\omega_i)=p_h(h)/(4|\omega_o\cdot h|)$。
+VNDF 反射到无效半球时返回 null，必须保留为零贡献，**不能不断重试直到成功**。
+金属度混合得到 $F_0=(1-m)((\eta-1)/(\eta+1))^2+m\,baseColor$。
+漫反射使用双方向 Fresnel 上界构造保守互易预算；不直接将无衰减 Lambertian 与镜面相加。
+推导、能量界、采样密度和测试参考详见 [BSDF 文档](docs/bsdf.md)。
+
+| API | 参数与返回约定 |
+| --- | --- |
+| `newPbr(alloc, Pbr)` | 线性 `base_color`、`metallic`、`roughness` 在 [0,1]；校验 IOR；分配错误可传播 |
+| `newMetal(alloc, color, roughness)` | 零粗糙度保留常色理想镜面，其余使用 GGX |
+| `newDielectric(alloc, ior)` | 空气/介质的光滑边界，透射权重含 $(\eta_i/\eta_t)^2$ |
+| `newTranslucent(alloc, color, transmission)` | 反射与漫透射概率分别为 $1-T,T$；不是粗糙折射 |
+| `Surface.eval/pdf/sample` | 不依赖场景几何的闭包求值与采样；可独立测试 |
+
+## 5. 直接光照与 MIS
+
+每个非 delta 顶点先抽取一个灯光样本、做阴影测试并累积 NEE，然后独立抽取 BSDF 继续路径。
+灯光候选为面积形状组、恒定环境、各点光源和各方向光，当前等概率选取。
+连续方向的 PDF 包含选光与组选形状概率。
+
+$$
+\widehat L_L=\frac{f_sL_e^{vis}|n\cdot\omega_L|}{p_L}w_L,
+\qquad w_L=\frac{p_L^2}{p_L^2+p_B^2},\quad w_B=1-w_L.
+$$
+
+BSDF 路径下一次命中发光/环境时只给该发光项乘 $w_B$，不缩放整条后续路径。
+因此两个估计量的期望是 $\int g(w_L+w_B)d\omega=\int g\,d\omega$，不会重复照亮。
+相机直接看到发光、delta 链后的发光和解析 delta 灯的 NEE 使用权重一。
+点光强度按 $I/r^2$ 衰减，阴影检查不越过灯的位置；方向光检查无限远。
+
+面积提议采用**方向空间估计**：实际辐亮度来自该方向首个可见表面或环境，
+而不是强行使用所选形状的发光。灯形状通常应同时注册在世界中，方向 PDF 与运动时间一致。
+非采样形状仍可被 BSDF 命中，但不能充当任意有效的灯光采样代理。
+
+`rayColorLit(ray, world, Sampler, depth, rr)` 是主入口；旧 `rayColor` 自动适配。
+`RenderParams.point_lights`、`distant_lights`、`sample_environment` 提供程序化控制。
+详细测度、遮挡、轮盘证明和数值参考见 [光照文档](docs/lighting.md)。
+
+## 6. 物理参数薄透镜
+
+场景 **1 单位 = 1 米**；焦距和传感器尺寸以毫米输入，内部转为米。
+物距为 $u$、像距为 $v$、焦距为 $f$，薄透镜满足
+
+$$
+\frac1f=\frac1u+\frac1v,\quad v=\frac{fu}{u-f},\quad
+W_{focus}=S_wu/v,\quad H_{focus}=S_hu/v,\quad r_{lens}=\frac{f}{2N}.
+$$
+
+同一胶片样本对应唯一焦平面点，不同镜头圆盘样本从不同起点发向该点，形成景深。
+快门均匀采样 $t=t_0+\xi(t_1-t_0)$。相对曝光为
+
+$$
+E=\frac{\Delta t/N^2}{(1/125)/8^2}\frac{ISO}{100}2^{EV}.
+$$
+
+默认参考曝光为一；增大光圈会同时改变景深和亮度，若只比较景深需用 EV 抵消亮度。
+渲染器在**线性样本累积前**应用 `Camera.sampleWeight(s,t)`；可选自然暗角为 $E\cos^4\theta$。
+这是理想薄透镜与相对摄影曝光，不是多片镜头、衍射、绝对标定传感器或传感器噪声模拟。
+完整 API、参数验证与推导见 [相机文档](docs/camera.md)。
+
+## 7. 加速、采样与稳定性
+
+- BVH 缓存子包围盒，最长质心轴中位划分，近子节点优先；单叶不重复求交。
+  当前仍为指针式 BVH，构建含插入排序，不适合无上限增加毛束，不是 SAH/扁平 BVH。
+- 默认线程数为逻辑 CPU 数，受行块数限制；默认每任务 8 行，调用线程也参与。
+- RNG 按像素和样本播种；同一构建与参数下，线程数/行块调度不改变输出。
+- Sobol 只用于胶片 2D、镜头 2D、快门 1D，八个随机数字平移副本；后续路径使用 PRNG。
+  不是全路径 Sobol 或完整 Owen scrambling；基础点缓存最多 80 KiB。
+- 八副本的均值估计线性 RGB 误差；需连续两个检查点达标，默认最早 32 spp 停止。
+  自适应停止有可选停止偏差及稀有高亮漏检风险，**参考图须关闭**。
+- 轮盘仅除实际存活概率，折射率补偿只用于重要性判断，不额外乘入辐亮度。
+- 阴影与延续射线采用方向相关几何法线偏移；其下限 $10^{-8}$ 米不是严格误差传播界。
+
+采样统计推导见 [采样文档](docs/sampling.md)，胶囊体与方向 PDF 推导见 [几何文档](docs/geometry.md)。
+
+## 8. 测试与注释规范
 
 ```powershell
-# Preview with the default Sobol + adaptive settings
-zig build run -Doptimize=ReleaseFast -- --width 600 --samples 128
-# Fixed-budget comparison/reference modes
-zig build run -Doptimize=ReleaseFast -- --width 600 --samples 128 --no-adaptive --sampler random
-zig build run -Doptimize=ReleaseFast -- --width 600 --samples 128 --no-adaptive --sampler sobol
-# Stricter adaptive tolerance; output parent directory must already exist
-zig build run -Doptimize=ReleaseFast -- --width 600 --samples 512 --min-samples 32 --relative-error 0.02 --absolute-error 0.001 --output preview.png
+zig build test --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+zig build test -Doptimize=ReleaseFast --summary all
+zig build test "-Dtest-filter=lighting"
 ```
 
-Adaptive stopping is a practical heuristic, not a guaranteed confidence interval:
-rare bright paths may be missed and data-dependent stopping can introduce bias.
-Disable it for fixed-budget reference images. Sobol may reduce error at a fixed
-budget, but does not guarantee lower wall time or lower error for every scene.
-Use [the mathematical explanation](docs/sampling.md) for the estimator details.
+根测试 [tests](src/tests.zig) 汇总 [BSDF](src/bsdf_tests.zig)、[相机](src/camera_tests.zig)、
+[几何](src/geometry_tests.zig)、[光照](src/lighting_tests.zig)、[场景](src/scene_tests.zig)、
+[BVH](src/bvh_tests.zig)、[积分器](src/integrator_tests.zig) 和 [采样](src/sampling_tests.zig) 测试。
+覆盖能量上界、互易性、独立数值求积、VNDF null 概率、TIR、折射权重、光源遮挡、
+相机对焦与实际曝光输出、OOM、线程一致性和 PNG 上下方向。
+统计测试固定种子和样本预算，有明确绝对误差容差，不把参考值直接取自被测 API。
+VS Code 测试配置通过构建脚本链接 stb/libc；不要绕过构建直接运行主测试根。
 
-**Compatibility:** corrected roulette weights, the new sample sequences and
-pixel jitter restricted to the film [0,1] intentionally change old images.
-Compare against analytic/high-sample references, not old biased pixel values.
-Gamma conversion still uses the actual number of samples taken at each pixel.
+自有代码注释使用中文及 `// @brief`、`// @param`、`// @return`、`// @notice`；
+核心推导使用 `// @method`，内容为 Markdown + LaTeX；不存在的项不硬凑。
+第三方 stb 头、生成 Vulkan 绑定和版权/许可文本保持原样，防止破坏上游维护和许可证。
+规则见 [注释规范](docs/comments.md)。
 
-## Tests
+本次完整构建测试在 Debug、ReleaseSafe、ReleaseFast 均为 **112/112 通过**；
+图像检查、线程一致性、格式及编辑器环境说明见 [验证记录](docs/validation.md)。
 
-```powershell
-zig build test
-zig build test -Doptimize=ReleaseSafe
-zig build test "-Dtest-filter=BVH"
-```
+## 9. 当前未覆盖的 PBR 能力
 
-Tests cover public API compilation, allocation failures, random ranges,
-geometry, BVH construction, noise, timing and PNG render/readback. Parallel
-regressions verify byte-identical pixels across worker counts and block sizes,
-thread-local RNG isolation, partial row blocks, PNG orientation, allocation
-cleanup and CLI validation.
-Numerical regressions cover diffuse/mirror energy, roulette and mixed-PDF
-expectations, 10,000-bounce stack safety, Sobol reference points/stratification,
-smooth-integral error, adaptive stopping and correct sample normalization.
-Temporary PNG files are cleaned up automatically. Scene objects use an arena
-allocator; image textures loaded through stb must be released with `deinit()`.
+- 不支持 PBRT/glTF 导入、三角网格、法线/粗糙度贴图、HDR 纹理环境、光谱渲染。
+- 图片纹理仍是 8 位最近点采样，尚未自动执行 sRGB 解码；本示例材质使用明确的线性常量。
+- 输出仍为 gamma 2.2 的 8 位 PNG 并截断显示范围，无 EXR/HDR 输出或色调映射。
+- 不支持完整体散射/BSSRDF、粗糙折射、嵌套介质；`Isotropic` 仅保留旧接口，主 BSDF 路径不支持。
+- 玻璃会遮挡直线 NEE 连接；折射焦散依赖普通路径追踪，噪声可能很高。
+- 旧 `rayColorWithBvh`/`rayColorWithoutBvh` 为兼容入口，不支持完整新材质，勿用于新场景。
 
-The workspace config routes VS Code's Zig test runner through `zig build test`
-so that tests link the same stb implementation as the application.
-
-## Layout
-
-- `src/main.zig` — scene construction and application entry point.
-- `src/render.zig`, `src/color.zig` — rendering, timing and light transport.
-- `src/object.zig`, `src/material.zig`, `src/texture.zig` — scene primitives.
-- `src/math.zig`, `src/random.zig`, `src/noise.zig`, `src/pdf.zig` — math and path sampling.
-- `src/sampling.zig` — shifted Sobol camera sampling and adaptive estimates.
-- `src/camera.zig` — camera and ray generation.
-- `src/stb.zig`, `src/stb_impl.c` — image loading and PNG output.
-- `src/tests.zig`, `src/bvh_tests.zig`, `src/integrator_tests.zig`, `src/sampling_tests.zig` — regression tests.
-- `src/vulkan.zig` — retained generated Vulkan binding; not used by this build.
-- `build.zig` — build, run and test steps, with C compiler warnings enabled.
+新增物理模型、MIS、相机和几何会改变原图；应比较解析或高样本参考，不要求与历史简化渲染逐像素一致。

@@ -1,17 +1,15 @@
 const std = @import("std");
 const math = @import("math.zig");
-const random = @import("random.zig");
 const camera = @import("camera.zig");
-const material = @import("material.zig");
-const texture = @import("texture.zig");
-const object = @import("object.zig");
 const render = @import("render.zig");
 const sampling = @import("sampling.zig");
+const scene_mod = @import("scene.zig");
 
 const Point3 = math.Point3;
 const Vec3 = math.Vec3;
 const Color = math.Color;
 
+// @brief 命令行参数；不改变用户原先设置的 8640 默认宽度，预览时应显式降低分辨率。
 pub const Options = struct {
     thread_count: usize = 0,
     help: bool = false,
@@ -24,7 +22,16 @@ pub const Options = struct {
     relative_error: f64 = 0.05,
     absolute_error: f64 = 0.002,
     output: [:0]const u8 = "random_scene.png",
+    focal_length_mm: f64 = 50,
+    f_number: f64 = 8,
+    focus_distance: f64 = 13.3,
+    shutter_seconds: f64 = 1.0 / 125.0,
+    iso: f64 = 100,
+    exposure_compensation: f64 = 0,
+    fur_strands: usize = 1800,
 
+    // @brief 解析并验证数值；物理相机还会校验对焦距离与焦距之间的关系。
+    // @param args 不包含可执行文件路径的参数切片。
     pub fn parse(args: []const [:0]const u8) !Options {
         var options = Options{};
         var i: usize = 0;
@@ -37,6 +44,34 @@ pub const Options = struct {
                 options.thread_count = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidThreadCount;
             } else if (std.mem.eql(u8, args[i], "--no-adaptive")) {
                 options.adaptive = false;
+            } else if (std.mem.eql(u8, args[i], "--focal-length") or std.mem.eql(u8, args[i], "--f-number") or
+                std.mem.eql(u8, args[i], "--focus-distance") or std.mem.eql(u8, args[i], "--shutter") or
+                std.mem.eql(u8, args[i], "--iso") or std.mem.eql(u8, args[i], "--exposure") or std.mem.eql(u8, args[i], "--fur-strands"))
+            {
+                const flag = args[i];
+                i += 1;
+                if (i == args.len) return error.MissingOptionValue;
+                if (std.mem.eql(u8, flag, "--fur-strands")) {
+                    options.fur_strands = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidFurCount;
+                    if (options.fur_strands > 100000) return error.InvalidFurCount;
+                } else {
+                    const value = std.fmt.parseFloat(f64, args[i]) catch return error.InvalidCameraParameter;
+                    if (!std.math.isFinite(value) or (value <= 0 and !std.mem.eql(u8, flag, "--exposure"))) return error.InvalidCameraParameter;
+                    if (std.mem.eql(u8, flag, "--focal-length")) {
+                        options.focal_length_mm = value;
+                    } else if (std.mem.eql(u8, flag, "--f-number")) {
+                        options.f_number = value;
+                    } else if (std.mem.eql(u8, flag, "--focus-distance")) {
+                        options.focus_distance = value;
+                    } else if (std.mem.eql(u8, flag, "--shutter")) {
+                        if (value > 1) return error.ShutterOutsideSceneInterval;
+                        options.shutter_seconds = value;
+                    } else if (std.mem.eql(u8, flag, "--iso")) {
+                        options.iso = value;
+                    } else {
+                        options.exposure_compensation = value;
+                    }
+                }
             } else if (std.mem.eql(u8, args[i], "--width") or std.mem.eql(u8, args[i], "--samples") or
                 std.mem.eql(u8, args[i], "--min-samples") or std.mem.eql(u8, args[i], "--rr-depth") or
                 std.mem.eql(u8, args[i], "--relative-error") or std.mem.eql(u8, args[i], "--absolute-error") or
@@ -87,53 +122,16 @@ const usage = "Usage: zrenderer [options]\n" ++
     "  --no-adaptive  Always use exactly --samples samples\n" ++
     "  --relative-error E  Relative error tolerance (default 0.05)\n" ++
     "  --absolute-error E  Linear RGB absolute tolerance (default 0.002)\n" ++
-    "  --output FILE   PNG path; parent directory must exist\n";
+    "  --output FILE   PNG path; parent directory must exist\n" ++
+    "  --focal-length MM  Physical focal length (default 50)\n" ++
+    "  --f-number N       Lens f-number (default 8)\n" ++
+    "  --focus-distance M Focus plane distance (default 13.3)\n" ++
+    "  --shutter SECONDS  Exposure duration, (0,1] (default 0.008)\n" ++
+    "  --iso N            Relative sensor gain (default 100)\n" ++
+    "  --exposure EV      Exposure compensation (default 0)\n" ++
+    "  --fur-strands N    Hero fur strand count, 0 disables (default 1800)\n";
 
-fn loadRandomScene(alloc: std.mem.Allocator) !*render.Scene {
-    std.debug.print("Loading random scene...\n", .{});
-    const scene = try alloc.create(render.Scene);
-    scene.* = render.Scene.init(alloc, "random_scene");
-
-    const checker = try texture.newCheckerColors(alloc, Color.init(0.2, 0.3, 0.1), Color.init(0.9, 0.9, 0.9));
-    const ground_material = try material.newLambertian(alloc, checker);
-    try scene.addObject(try object.newSphere(alloc, Point3.init(0, -1000, 0), Point3.init(0, -1000, 0), 0.0, 1.0, 1000.0, ground_material));
-
-    var a: i32 = -11;
-    while (a < 11) : (a += 1) {
-        var b: i32 = -11;
-        while (b < 11) : (b += 1) {
-            const choose_mat = random.randomDouble();
-            const center = Point3.init(
-                @as(f64, @floatFromInt(a)) + 0.9 * random.randomDouble(),
-                0.2,
-                @as(f64, @floatFromInt(b)) + 0.9 * random.randomDouble(),
-            );
-
-            if (center.sub(Point3.init(4, 0.2, 0)).length() > 0.9) {
-                if (choose_mat < 0.8) {
-                    // diffuse
-                    const albedo = random.randomVec().mul(random.randomVec());
-                    const sphere_material = try material.newLambertian(alloc, try texture.newSolid(alloc, albedo));
-                    const center2 = center.add(Vec3.init(0, random.randomDoubleRange(0, 0.5), 0));
-                    try scene.addObject(try object.newSphere(alloc, center, center2, 0.0, 1.0, 0.2, sphere_material));
-                } else if (choose_mat < 0.9) {
-                    // metal
-                    const albedo = random.randomVecRange(0.5, 1.0);
-                    const fuzz = random.randomDoubleRange(0, 0.5);
-                    const sphere_material = try material.newMetal(alloc, albedo, fuzz);
-                    try scene.addObject(try object.newSphere(alloc, center, center, 0.0, 1.0, 0.2, sphere_material));
-                } else {
-                    // glass
-                    const sphere_material = try material.newDielectric(alloc, 1.5);
-                    try scene.addObject(try object.newSphere(alloc, center, center, 0.0, 1.0, 0.2, sphere_material));
-                }
-            }
-        }
-    }
-    try scene.buildBvh();
-    return scene;
-}
-
+// @brief 解析参数、建立物理相机与场景、执行并行渲染并写出 PNG。
 pub fn main(init: std.process.Init) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const alloc = arena_state.allocator();
@@ -152,25 +150,30 @@ pub fn main(init: std.process.Init) !void {
     var timer = render.Clock{ .io = init.io };
     timer.start();
 
-    const scene = try loadRandomScene(alloc);
-    std.debug.print("Scene loaded.\n", .{});
-
-    const args = camera.CameraArgs{
+    // @notice 参数解析已将快门限制在当前场景 BVH 的 [0,1] 秒运动区间内。
+    const args = camera.PhysicalCameraArgs{
         .lookfrom = Point3.init(13, 2, 3),
-        .lookat = Point3.init(0, 0, 0),
+        .lookat = Point3.init(0, 0.65, 0),
         .vup = Vec3.init(0, 1, 0),
-        .vfov = 20.0,
-        .aperture = 0.1,
-        .aspect_ratio = 16.0 / 9.0,
+        .focal_length_mm = options.focal_length_mm,
+        .f_number = options.f_number,
+        .focus_distance = options.focus_distance,
+        .shutter_close = options.shutter_seconds,
+        .iso = options.iso,
+        .exposure_compensation = options.exposure_compensation,
     };
-    const cam = args.build();
+    const cam = try args.build();
+    std.debug.print("Loading PBR scene...\n", .{});
+    const scene = try scene_mod.loadRandomScene(alloc, .{ .fur_strands = options.fur_strands });
+    std.debug.print("Scene loaded: {d} objects; {d} hero fur strands.\n", .{ scene.world.list.items.len, options.fur_strands });
 
     const image_width = options.image_width;
-    const image_height: i32 = @intFromFloat(@as(f64, @floatFromInt(image_width)) / args.aspect_ratio);
+    const image_height: i32 = @intFromFloat(@as(f64, @floatFromInt(image_width)) / args.aspectRatio());
 
     const params = render.RenderParams{
         .cam = cam,
-        .background = Color.init(0.7, 0.8, 1.0),
+        .background = Color.init(0.3, 0.4, 0.6),
+        .sample_environment = true,
         .image_width = image_width,
         .image_height = image_height,
         .samples_per_pixel = options.samples,

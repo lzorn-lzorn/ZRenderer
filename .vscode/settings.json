@@ -3,5 +3,8 @@
         "build",
         "test",
         "-Dtest-filter=${filter}"
+    ],
+    "clangd.fallbackFlags": [
+        "-std=c17"
     ]
 }

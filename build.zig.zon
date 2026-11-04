@@ -1,3 +1,4 @@
+// @brief 声明包身份、最低 Zig 版本及分发文件范围；当前无外部包依赖。
 .{
     .name = .zrenderer,
     .version = "0.1.0",

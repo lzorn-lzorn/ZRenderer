@@ -6,11 +6,14 @@ const object = @import("object.zig");
 const color_mod = @import("color.zig");
 const stb = @import("stb.zig");
 const sampling = @import("sampling.zig");
+const light = @import("light.zig");
 
 const Color = math.Color;
 const Camera = camera.Camera;
 const Allocator = std.mem.Allocator;
 
+// @brief 管理场景对象列表、可选采样光源和构建后的加速结构。
+// @notice 对象和材质由场景分配器生命周期管理；渲染前必须建立 BVH。
 pub const Scene = struct {
     alloc: Allocator,
     name: []const u8 = "",
@@ -18,46 +21,56 @@ pub const Scene = struct {
     light: ?*object.Object = null,
     bvh: *object.BvhNode = undefined,
 
+    // @brief 创建空场景，借用名称切片并保存分配器。
     pub fn init(alloc: Allocator, name: []const u8) Scene {
         return .{ .alloc = alloc, .name = name, .world = object.ObjectGroup.init(alloc) };
     }
 
+    // @brief 追加借用对象；列表扩容失败时返回错误。
     pub fn addObject(self: *Scene, obj: *object.Object) !void {
         try self.world.add(obj);
     }
 
+    // @brief 为非空场景建立覆盖时间 [0,1] 的 BVH。
+    // @return 无效对象范围、缺失包围盒或分配失败时返回错误。
     pub fn buildBvh(self: *Scene) object.BvhNode.BuildError!void {
         self.bvh = try object.BvhNode.init(self.alloc, self.world.list.items, 0, self.world.list.items.len, 0, 1);
     }
 };
 
+// @brief 使用清醒时间时钟统计经过时间。
 pub const Clock = struct {
     io: std.Io,
     start_time: i128 = 0,
     end_time: i128 = 0,
     is_running: bool = false,
 
+    // @brief 重设起点并开始计时。
     pub fn start(self: *Clock) void {
         self.start_time = std.Io.Clock.awake.now(self.io).toNanoseconds();
         self.is_running = true;
     }
 
+    // @brief 记录终点并停止计时。
     pub fn stop(self: *Clock) void {
         self.end_time = std.Io.Clock.awake.now(self.io).toNanoseconds();
         self.is_running = false;
     }
 
+    // @brief 返回已开始的计时区间秒数；运行中使用当前时间作为终点。
     pub fn elapsedSeconds(self: Clock) f64 {
         const ns = if (self.is_running) std.Io.Clock.awake.now(self.io).toNanoseconds() - self.start_time else self.end_time - self.start_time;
         return @as(f64, @floatFromInt(ns)) / 1e9;
     }
 };
 
+// @brief 渲染结束后汇总的样本总数和提前停止像素数。
 pub const RenderStats = struct {
     total_samples: u64 = 0,
     early_stopped_pixels: u64 = 0,
 };
 
+// @brief 相机、积分器、线程调度和采样停止设置。
 pub const RenderParams = struct {
     cam: Camera,
     background: Color,
@@ -68,7 +81,7 @@ pub const RenderParams = struct {
     rr: f64,
     channel: i32,
     show_progress: bool = true,
-    /// Zero selects the available logical CPU count; one renders on the caller.
+    // @notice 零表示使用可用逻辑处理器数；一表示仅在调用线程渲染。
     thread_count: usize = 0,
     rows_per_task: usize = 8,
     seed: u64 = random.default_seed,
@@ -76,13 +89,22 @@ pub const RenderParams = struct {
     adaptive: bool = true,
     min_samples: u32 = 16,
     absolute_error: f64 = 0.002,
+    // @brief 可选独立光源与恒定环境重要性采样；切片在所有工作线程退出前保持有效。
+    point_lights: []const light.PointLight = &.{},
+    distant_lights: []const light.DistantLight = &.{},
+    sample_environment: bool = false,
     relative_error: f64 = 0.05,
-    /// Optional caller-owned result, written only after all workers join.
+    // @notice 可选的调用者自有统计输出，仅在全部工作线程汇合后写入。
     stats: ?*RenderStats = null,
 };
 
-/// Returns top-to-bottom RGB pixels. The caller owns the returned allocation.
-/// The scene, materials and textures must remain read-only until this returns.
+// @brief 渲染为自上而下、紧密排列的 RGB 字节缓冲。
+// @param alloc 在调用线程上分配输出及工作资源的分配器。
+// @param params 渲染设置；宽高至少为二，仅支持三个颜色通道。
+// @param world 已建立的只读 BVH，其时间范围须覆盖相机快门。
+// @param lights 可选的方向采样几何体，须支持有效的生成及密度求值。
+// @return 调用者负责释放的像素缓冲；参数、分配或线程创建失败时返回错误。
+// @notice 返回前，场景、材质和纹理必须保持只读且存活。
 pub fn renderPixels(
     alloc: Allocator,
     params: RenderParams,
@@ -99,6 +121,10 @@ pub fn renderPixels(
         !std.math.isFinite(params.relative_error) or params.absolute_error < 0 or params.relative_error < 0)
         return error.InvalidRenderParams;
 
+    if (!(light.Sampler{ .area = lights, .background = params.background, .points = params.point_lights, .distant = params.distant_lights }).valid() or
+        !std.math.isFinite(params.cam.exposure_scale) or params.cam.exposure_scale <= 0)
+        return error.InvalidRenderParams;
+
     const w: usize = @intCast(params.image_width);
     const h: usize = @intCast(params.image_height);
     const stride = try std.math.mul(usize, w, 3);
@@ -106,8 +132,8 @@ pub fn renderPixels(
     const data = try alloc.alloc(u8, try std.math.mul(usize, stride, h));
     errdefer alloc.free(data);
 
-    // The unshifted Sobol coordinates depend only on sample number, not pixel.
-    // Bound cache memory at 80 KiB; extreme budgets compute later points on demand.
+    // @notice 未位移的 Sobol 坐标只依赖样本序号，与像素无关。
+    // @notice 缓存最多占 80 KiB；超大预算中的后续基础点按需计算。
     const point_count = @min((@as(usize, @intCast(params.samples_per_pixel)) - 1) / sampling.replicas + 1, 4096);
     const points: []sampling.SobolPoint = if (params.sampler == .sobol) try alloc.alloc(sampling.SobolPoint, point_count) else &.{};
     defer alloc.free(points);
@@ -133,11 +159,11 @@ pub fn renderPixels(
     if (worker_count == 1) {
         work.run(true);
     } else if (!@import("builtin").single_threaded) {
-        // All allocations happen on the caller; workers never use the arena.
+        // @notice 所有分配均在调用线程完成，工作线程不访问区域分配器。
         const threads = try alloc.alloc(std.Thread, worker_count - 1);
         defer alloc.free(threads);
         var started: usize = 0;
-        // Join before releasing either the work context or its pixel buffer.
+        // @notice 释放工作上下文或像素缓冲前，必须先汇合已启动的所有线程。
         defer for (threads[0..started]) |thread| thread.join();
         errdefer work.cancelled.store(true, .monotonic);
         for (threads) |*thread| {
@@ -179,7 +205,7 @@ const RenderWork = struct {
             const end = @min(first + self.rows_per_task, self.height);
             for (first..end) |row| self.renderRow(row);
             const done = self.completed_rows.fetchAdd(end - first, .monotonic) + end - first;
-            // Only the caller prints, at most once per percentage point.
+            // @notice 仅调用线程打印进度，每个百分点最多输出一次。
             const percent = done * 100 / self.height;
             if (report_progress and self.params.show_progress and percent > last_percent and percent < 100) {
                 std.debug.print("\rRendering: {d}% ({d}/{d} rows)", .{ percent, done, self.height });
@@ -190,7 +216,7 @@ const RenderWork = struct {
 
     fn renderRow(self: *RenderWork, row: usize) void {
         const params = self.params;
-        // Camera v points upwards; PNG rows start at the top of the image.
+        // @notice 相机 v 轴向上，而 PNG 行从图像顶部开始。
         const j = self.height - 1 - row;
         const max_samples: u32 = @intCast(params.samples_per_pixel);
         var row_samples: u64 = 0;
@@ -202,11 +228,18 @@ const RenderWork = struct {
                 const sequence_index = estimate.count / sampling.replicas;
                 const point: sampling.SobolPoint = if (params.sampler == .random) @splat(0) else if (sequence_index < self.sobol_points.len) self.sobol_points[sequence_index] else sampling.sobolPoint(sequence_index);
                 const sample = sampler.startSampleWithPoint(estimate.count, point);
-                // Each sample stays within its pixel and within the film [0,1].
+                // @notice 样本保持在所属像素内，并处于成像平面 [0,1] 范围。
                 const u = (@as(f64, @floatFromInt(i)) + sample[0]) / @as(f64, @floatFromInt(self.width));
                 const v = (@as(f64, @floatFromInt(j)) + sample[1]) / @as(f64, @floatFromInt(self.height));
                 const r = params.cam.getRaySampled(u, v, sample[2], sample[3], sample[4]);
-                estimate.add(color_mod.rayColor(r, params.background, self.world, self.lights, params.min_bounce, params.rr));
+                const radiance = color_mod.rayColorLit(r, self.world, .{
+                    .area = self.lights,
+                    .background = params.background,
+                    .points = params.point_lights,
+                    .distant = params.distant_lights,
+                    .sample_environment = params.sample_environment,
+                }, params.min_bounce, params.rr);
+                estimate.add(radiance.scale(params.cam.sampleWeight(u, v)));
                 if (params.adaptive and estimate.converged(params.min_samples, params.absolute_error, params.relative_error)) break;
             }
             row_samples += estimate.count;
@@ -219,6 +252,9 @@ const RenderWork = struct {
     }
 };
 
+// @brief 渲染像素后单次编码 PNG，随后释放像素缓冲。
+// @param out_filename 以零结尾的输出路径；父目录须已存在。
+// @return 渲染错误或编码失败错误；失败时不保证不存在部分输出文件。
 pub fn renderImage(
     alloc: Allocator,
     params: RenderParams,
@@ -229,7 +265,7 @@ pub fn renderImage(
     const data = try renderPixels(alloc, params, world, lights);
     defer alloc.free(data);
 
-    // All workers have joined: encode exactly once, without intermediate files.
+    // @notice 所有工作线程均已汇合：只编码一次，不产生中间文件。
     if (params.show_progress) std.debug.print("Encoding PNG...\n", .{});
     const ok = stb.stbi_write_png(out_filename, params.image_width, params.image_height, params.channel, data.ptr, 0);
     if (ok == 0) {

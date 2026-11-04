@@ -73,8 +73,8 @@ test "mixed light and BSDF sampling preserves constant-environment expectation" 
     const albedo = math.Color.init(0.25, 0.5, 0.75);
     const mat = try material.newLambertian(alloc, try texture.newSolid(alloc, albedo));
     const world = try plane(alloc, mat);
-    // A sampling proxy, intentionally not in the world: every outgoing ray sees
-    // the same environment, so the analytical answer is albedo * background.
+    // @notice 此采样代理故意不加入场景，因此每条出射光线看到相同环境。
+    // @method 解析结果为反照率与背景颜色逐分量相乘，即 albedo * background。
     const proxy = try object.newXzRect(alloc, -2, 2, -2, 2, 2, mat);
     const background = math.Color.init(0.8, 0.6, 0.4);
     random.seed(123);

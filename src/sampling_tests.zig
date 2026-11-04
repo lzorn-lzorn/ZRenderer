@@ -61,7 +61,7 @@ test "randomized Sobol improves a smooth integral at a fixed sample budget" {
                 const point = sampler.startSample(@intCast(i));
                 sum += point[0] + point[1];
             }
-            const error_value = sum / 128 - 1; // Integral of x+y over [0,1]^2.
+            const error_value = sum / 128 - 1; // @method $\int_{[0,1]^2}(x+y)\,dx\,dy=1$，用于计算估计误差。
             if (mode == .sobol) sobol_mse += error_value * error_value else random_mse += error_value * error_value;
         }
     }
