@@ -11,7 +11,6 @@ const Color = math.Color;
 // @brief 随机场景控制参数；固定种子独立于渲染线程和逐像素随机流。
 pub const Options = struct {
     seed: u64 = random.default_seed,
-    fur_strands: usize = 1800,
 };
 
 const water_amplitude: f64 = 0.045;
@@ -31,7 +30,7 @@ fn newJade(alloc: std.mem.Allocator) !*material.Material {
     });
 }
 
-// @brief 水平圆盘覆盖整个竖直运动扫掠体；毛球半径也包含所有弯曲毛束。
+// @brief 水平圆盘覆盖整个竖直运动扫掠体。
 const Footprint = struct { center: Point3, radius: f64, protected: bool };
 
 // @brief 只限制涉及玉石或波动水球的重叠，普通球之间保留原随机布局语义。
@@ -46,34 +45,9 @@ fn overlapsProtected(candidate: Footprint, previous: []const Footprint) bool {
     return false;
 }
 
-// @brief 在球面生成两段弯曲细毛，每段为精确胶囊几何，拥有真实轮廓、投影和遮挡。
-// @param radius 球半径，count 毛束数量；mat 为各向同性粗糙表面 BSDF。
-// @method 球面根部使用 $z=1-2\xi_1,\phi=2\pi\xi_2$，均匀面积密度为 $1/(4\pi R^2)$。
-// @method 中点沿法向生长，末端加入切向弯曲；半径递减近似纤维渐细，两段胶囊可能重叠。
-// @notice 这是显式毛束几何加普通 GGX，不是 Marschner/Chiang 毛发 BSDF；不模拟毛鳞片和内部纤维散射。
-pub fn addFur(scene: *render.Scene, center: Point3, radius: f64, count: usize, mat: *material.Material) !void {
-    const alloc = scene.alloc;
-    for (0..count) |_| {
-        const z = random.randomDoubleRange(-1, 1);
-        const phi = 2 * math.pi * random.randomDouble();
-        const r = @sqrt(@max(0, 1 - z * z));
-        const normal = Point3.init(r * @cos(phi), z, r * @sin(phi));
-        var frame: math.Onb = .{};
-        frame.buildFromW(normal);
-        const bend = frame.u().scale(random.randomDoubleRange(-0.45, 0.45))
-            .add(frame.v().scale(random.randomDoubleRange(-0.45, 0.45)));
-        const length = radius * random.randomDoubleRange(0.07, 0.17);
-        const root = center.add(normal.scale(radius * 0.997));
-        const middle = root.add(normal.scale(length * 0.55)).add(bend.scale(length * 0.15));
-        const tip = root.add(normal.scale(length)).add(bend.scale(length));
-        try scene.addObject(try object.newCapsule(alloc, root, middle, radius * 0.005, mat));
-        try scene.addObject(try object.newCapsule(alloc, middle, tip, radius * 0.003, mat));
-    }
-}
-
-// @brief 构建原随机球阵列并添加可识别的 PBR 展示球；所有资源由调用者 arena 统一释放。
-// @param options fur_strands 仅控制大展示球毛束数；零表示关闭所有细毛几何，保留球体。
-// @notice 水球是真实静态波动曲面加空气/水界面，不做流体模拟；玉球采用均匀介质随机游走。
+// @brief 构建原随机球阵列并添加可识别的展示球；所有资源由调用者 arena 统一释放。
+// @param options seed 控制确定性随机布局。
+// @notice 水球是真实静态波动曲面加空气/水界面，不做流体模拟；玉球采用均匀介质随机游走；丝绸球为各向异性布料材质。
 pub fn loadRandomScene(alloc: std.mem.Allocator, options: Options) !*render.Scene {
     random.seed(options.seed);
     const scene = try alloc.create(render.Scene);
@@ -84,17 +58,17 @@ pub fn loadRandomScene(alloc: std.mem.Allocator, options: Options) !*render.Scen
 
     const water = try material.newDielectric(alloc, 1.333);
     const jade = try newJade(alloc);
-    const fur = try material.newPbr(alloc, .{ .base_color = .{ .x = 0.48, .y = 0.19, .z = 0.065 }, .metallic = 0, .roughness = 0.72 });
+    const silk = try material.newSilk(alloc, .{ .base_color = .{ .x = 0.92, .y = 0.88, .z = 0.80 }, .roughness = 0.25, .anisotropy = 0.75 });
     const hero_centers = [_]Point3{ .{ .y = outerRadius(0.9), .z = -2.5 }, .{ .y = 0.9 }, .{ .y = 0.9, .z = 2.5 } };
-    const hero_materials = [_]*material.Material{ water, jade, fur };
+    const hero_materials = [_]*material.Material{ water, jade, silk };
     var footprints: std.ArrayList(Footprint) = .empty;
     defer footprints.deinit(alloc);
     for (hero_centers, 0..) |center, index| {
-        try footprints.append(alloc, .{ .center = center, .radius = if (index == 0) outerRadius(0.9) else if (index == 2 and options.fur_strands > 0) 0.9 * 1.21 else 0.9, .protected = index < 2 });
+        try footprints.append(alloc, .{ .center = center, .radius = if (index == 0) outerRadius(0.9) else 0.9, .protected = index < 2 });
     }
     var water_count: usize = 0;
     var jade_count: usize = 0;
-    var fur_count: usize = 0;
+    var silk_count: usize = 0;
     var a: i32 = -11;
     while (a < 11) : (a += 1) {
         var b: i32 = -11;
@@ -110,16 +84,14 @@ pub fn loadRandomScene(alloc: std.mem.Allocator, options: Options) !*render.Scen
             if (reserved) continue;
             var mat: *material.Material = undefined;
             var end = center;
-            var furry = false;
             if (choose < 0.025 and water_count < 3) {
                 mat = water;
                 center.y = outerRadius(0.2);
                 end = center;
             } else if (choose < 0.055 and jade_count < 3) {
                 mat = jade;
-            } else if (choose < 0.065 and fur_count < 1) {
-                mat = fur;
-                furry = true;
+            } else if (choose < 0.065 and silk_count < 1) {
+                mat = silk;
             } else if (choose < 0.7) {
                 const albedo = random.randomVec().mul(random.randomVec());
                 mat = try material.newPbr(alloc, .{ .base_color = albedo, .metallic = 0, .roughness = random.randomDoubleRange(0.2, 0.85) });
@@ -130,18 +102,17 @@ pub fn loadRandomScene(alloc: std.mem.Allocator, options: Options) !*render.Scen
             } else {
                 mat = try material.newDielectric(alloc, 1.5);
             }
-            const footprint = Footprint{ .center = center, .radius = if (mat == water) outerRadius(0.2) else if (furry and options.fur_strands > 0) 0.2 * 1.21 else 0.2, .protected = mat == water or mat == jade };
+            const footprint = Footprint{ .center = center, .radius = if (mat == water) outerRadius(0.2) else 0.2, .protected = mat == water or mat == jade };
             // @notice 不为碰撞重采样；固定种子下拒绝顺序确定，竖直动画的所有时刻均被圆盘覆盖。
             if (overlapsProtected(footprint, footprints.items)) continue;
             try footprints.append(alloc, footprint);
             if (mat == water) water_count += 1;
             if (mat == jade) jade_count += 1;
-            if (furry) fur_count += 1;
+            if (mat == silk) silk_count += 1;
             try scene.addObject(if (mat == water)
                 try object.newWavySphere(alloc, center, 0.2, water_amplitude, water_frequency, mat)
             else
                 try object.newSphere(alloc, center, end, 0, 1, 0.2, mat));
-            if (furry and options.fur_strands > 0) try addFur(scene, center, 0.2, @min(options.fur_strands, 128), fur);
         }
     }
     for (hero_centers, hero_materials) |center, mat| {
@@ -150,7 +121,6 @@ pub fn loadRandomScene(alloc: std.mem.Allocator, options: Options) !*render.Scen
         else
             try object.newSphere(alloc, center, center, 0, 1, 0.9, mat));
     }
-    try addFur(scene, hero_centers[2], 0.9, options.fur_strands, fur);
 
     // @brief 向下发光的大面积灯产生可采样高光；同一对象同时加入世界和光源集合。
     const emission = try alloc.create(material.DiffuseLight);
@@ -186,7 +156,7 @@ fn flip(alloc: std.mem.Allocator, rect: *object.Object) !*object.Object {
     return obj;
 }
 
-// @brief 暗色摄影棚中并列展示波动水球与体积玉球；无随机布局、毛束或额外装饰。
+// @brief 暗色摄影棚中并列展示波动水球与体积玉球；无随机布局或额外装饰。
 // @notice 背侧灯在画面上方及侧方，不用整面发光背景冒充透射；所有灯均注册到同一个采样组。
 pub fn loadMaterialScene(alloc: std.mem.Allocator) !*render.Scene {
     const scene = try alloc.create(render.Scene);

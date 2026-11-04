@@ -32,7 +32,6 @@ pub const Options = struct {
     shutter_seconds: f64 = 1.0 / 125.0,
     iso: f64 = 100,
     exposure_compensation: f64 = 0,
-    fur_strands: usize = 1800,
 
     // @brief 解析并验证数值；物理相机还会校验对焦距离与焦距之间的关系。
     // @param args 不包含可执行文件路径的参数切片。
@@ -55,32 +54,27 @@ pub const Options = struct {
                 options.adaptive = false;
             } else if (std.mem.eql(u8, args[i], "--focal-length") or std.mem.eql(u8, args[i], "--f-number") or
                 std.mem.eql(u8, args[i], "--focus-distance") or std.mem.eql(u8, args[i], "--shutter") or
-                std.mem.eql(u8, args[i], "--iso") or std.mem.eql(u8, args[i], "--exposure") or std.mem.eql(u8, args[i], "--fur-strands"))
+                std.mem.eql(u8, args[i], "--iso") or std.mem.eql(u8, args[i], "--exposure"))
             {
                 const flag = args[i];
                 i += 1;
                 if (i == args.len) return error.MissingOptionValue;
-                if (std.mem.eql(u8, flag, "--fur-strands")) {
-                    options.fur_strands = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidFurCount;
-                    if (options.fur_strands > 100000) return error.InvalidFurCount;
+                const value = std.fmt.parseFloat(f64, args[i]) catch return error.InvalidCameraParameter;
+                if (!std.math.isFinite(value) or (value <= 0 and !std.mem.eql(u8, flag, "--exposure"))) return error.InvalidCameraParameter;
+                if (std.mem.eql(u8, flag, "--focal-length")) {
+                    options.focal_length_mm = value;
+                } else if (std.mem.eql(u8, flag, "--f-number")) {
+                    options.f_number = value;
+                } else if (std.mem.eql(u8, flag, "--focus-distance")) {
+                    options.focus_distance = value;
+                    explicit_focus = true;
+                } else if (std.mem.eql(u8, flag, "--shutter")) {
+                    if (value > 1) return error.ShutterOutsideSceneInterval;
+                    options.shutter_seconds = value;
+                } else if (std.mem.eql(u8, flag, "--iso")) {
+                    options.iso = value;
                 } else {
-                    const value = std.fmt.parseFloat(f64, args[i]) catch return error.InvalidCameraParameter;
-                    if (!std.math.isFinite(value) or (value <= 0 and !std.mem.eql(u8, flag, "--exposure"))) return error.InvalidCameraParameter;
-                    if (std.mem.eql(u8, flag, "--focal-length")) {
-                        options.focal_length_mm = value;
-                    } else if (std.mem.eql(u8, flag, "--f-number")) {
-                        options.f_number = value;
-                    } else if (std.mem.eql(u8, flag, "--focus-distance")) {
-                        options.focus_distance = value;
-                        explicit_focus = true;
-                    } else if (std.mem.eql(u8, flag, "--shutter")) {
-                        if (value > 1) return error.ShutterOutsideSceneInterval;
-                        options.shutter_seconds = value;
-                    } else if (std.mem.eql(u8, flag, "--iso")) {
-                        options.iso = value;
-                    } else {
-                        options.exposure_compensation = value;
-                    }
+                    options.exposure_compensation = value;
                 }
             } else if (std.mem.eql(u8, args[i], "--width") or std.mem.eql(u8, args[i], "--samples") or
                 std.mem.eql(u8, args[i], "--min-samples") or std.mem.eql(u8, args[i], "--rr-depth") or
@@ -161,8 +155,7 @@ const usage = "Usage: zrenderer [options]\n" ++
     "  --focus-distance M Focus plane distance (random 13.3, materials 7.524)\n" ++
     "  --shutter SECONDS  Exposure duration, (0,1] (default 0.008)\n" ++
     "  --iso N            Relative sensor gain (default 100)\n" ++
-    "  --exposure EV      Exposure compensation (default 0)\n" ++
-    "  --fur-strands N    Hero fur strand count, 0 disables (default 1800)\n";
+    "  --exposure EV      Exposure compensation (default 0)\n";
 
 // @brief 解析参数、建立物理相机与场景、执行并行渲染并写出 PNG。
 pub fn main(init: std.process.Init) !void {
@@ -188,10 +181,10 @@ pub fn main(init: std.process.Init) !void {
     const cam = try args.build();
     std.debug.print("Loading {s} scene...\n", .{@tagName(options.scene)});
     const scene = switch (options.scene) {
-        .random => try scene_mod.loadRandomScene(alloc, .{ .fur_strands = options.fur_strands }),
+        .random => try scene_mod.loadRandomScene(alloc, .{}),
         .materials => try scene_mod.loadMaterialScene(alloc),
     };
-    std.debug.print("Scene loaded: {d} objects; {d} hero fur strands.\n", .{ scene.world.list.items.len, if (options.scene == .random) options.fur_strands else @as(usize, 0) });
+    std.debug.print("Scene loaded: {d} objects.\n", .{scene.world.list.items.len});
 
     const image_width = options.image_width;
     const image_height: i32 = @intFromFloat(@as(f64, @floatFromInt(image_width)) / args.aspectRatio());

@@ -42,6 +42,8 @@ delta 样本的 `pdf` 是**所选离散分支概率质量**，不是可与光源
 
 - `newPbr(alloc, params: Pbr) CreateError!*Material`
 - `Pbr { base_color: Color, metallic: f64, roughness: f64, ior: f64 = 1.5 }`
+- `newSilk(alloc, params: Silk) CreateError!*Material`
+- `Silk { base_color: Color, roughness: f64, anisotropy: f64 = 0, ior: f64 = 1.5 }`
 - `newTranslucent(alloc, color: Color, transmission: f64) CreateError!*Material`
 - `newSubsurface(alloc, params: Subsurface) CreateError!*Material`
 - `Subsurface { ior: f64 = 1.54, medium: medium.Homogeneous = .{} }`
@@ -57,7 +59,7 @@ IOR 的数值支持域为 $[10^{-6},10^6]$，覆盖常见介质并限制极端�
 常量/棋盘反照率及程序纹理频率在构造时校验；程序纹理和后续修改后的纹理颜色还在新接口求值时校验。
 无效纹理颜色返回黑色/零密度/空样本，不能把 HDR 发光纹理当作反照率使用。
 
-直接构造 `bsdf.Surface` 也会在 `eval/pdf/sample` 入口校验颜色、粗糙度与透射比例。
+直接构造 `bsdf.Surface` 也会在 `eval/pdf/sample` 入口校验颜色、粗糙度、透射比例与各向异性比例。
 `specular != null` 时要求 `transmission == 0`；不支持同时使用微表面镜面与薄层漫透射。
 非法闭包统一返回黑色、零密度和 `null`，不能让构造器外的直接初始化或参数修改绕过检查。
 `fresnelSchlick` 是低层数学函数，要求合法 `F0` 和有限余弦；
@@ -199,6 +201,31 @@ $$
 
 若重试直到成功，却仍使用未条件化密度，就会把结果放大为原来的 $1/P(accepted)$。
 
+### 各向异性 GGX（丝绸/缎面）
+
+丝绸的纤维沿切向对齐，使切向(u)与副切向(v)具有不同粗糙度。取 $\alpha=\max(0.001,roughness^2)$、
+$aspect=\sqrt{1-0.9\,anisotropy}$，则
+
+$$
+\alpha_u=\max(0.001,\alpha\cdot aspect),\qquad
+\alpha_v=\max(0.001,\alpha/ aspect).
+$$
+
+切向(u)为平滑的纤维方向，$anisotropy$ 越大高光越沿副切向(v)拉长。各向异性 NDF、Smith 遮蔽与 VNDF 采样分别是
+
+$$
+D(h)=\frac{1}{\pi\alpha_u\alpha_v\left(\frac{h_u^2}{\alpha_u^2}+\frac{h_v^2}{\alpha_v^2}+h_z^2\right)^2},\qquad
+\frac{G_1(v)}{v_z}=\frac{2}{v_z+\sqrt{v_z^2+\alpha_u^2v_u^2+\alpha_v^2v_v^2}},
+$$
+
+$$
+v_h=\operatorname{normalize}(\alpha_u\omega_{ou},\alpha_v\omega_{ov},c_o),\qquad
+h=\operatorname{normalize}(\alpha_u n_{hu},\alpha_v n_{hv},\max(0,n_{hz})).
+$$
+
+反射雅可比 $1/(4|\omega_o\cdot h|)$ 与漫反射 Fresnel 上界证明均与各向同性相同，因此互易性与能量预算不变。
+`anisotropy=0` 时严格退化为各向同性 GGX。切向由几何法线经 `Onb.buildFromW` 确定性导出，不依赖 UV 切线。
+
 ## PBR 漫反射预算的互易性和能量证明
 
 简单把完整 Lambertian 加在 GGX 上可能超过白炉能量；只乘依赖出射方向的系数又会破坏互易性。
@@ -256,7 +283,7 @@ $$
 这是有证明的保守模型，**不是精确 glTF BSDF，也不等同于精确分层介质**：双边预算会进一步损失能量。
 单次 GGX 还会丢失微表面间多次反射能量，因此白材质可能变暗；不应通过无条件归一化掩盖此损失。
 例如白金属 $F_0=1,\alpha=1,c_o=1$ 的反照率为 $1-\ln2\approx0.30685$。
-没有实现多次散射能量补偿、粗糙介电透射、各向异性、纤维或 sheen。
+没有实现多次散射能量补偿、粗糙介电透射、sheen 纤维散射瓣或纤维内部折射；各向异性 GGX 已用于丝绸/缎面材质。
 PBR 是不透明模型，即使 `metallic=0` 也不会折射。
 PBR 的零粗糙度保留有限 GGX 峰；严格 delta 镜面请使用 `newMetal(..., 0)`，其权重刻意保持常量 albedo，兼容原解析镜面测试。
 
@@ -332,6 +359,7 @@ PBR、薄层和 `Subsurface` 只在新 BSDF 接口工作，旧散射接口返回
 
 [测试集](../tests/bsdf_tests.zig) 覆盖世界空间 sample/eval/pdf 一致性、掠射有限值、反射白炉、
 互易性、VNDF 经验分箱与包含 null 的归一化、漫反射/漫透射端点和概率抵消、
+各向异性丝绸 sample/eval/pdf 一致性与零各向异性退化为电介质 PBR、
 镜面常量权重、精确 Fresnel、水的进入/离开 eta²、Snell 与全反射、非法参数和逐次分配失败。
 另有独立解析的 GGX 双瓣 f/pdf、多个粗糙度的法向接受率、逐通道镜面/漫反射预算求积、
 跨界面往返折射、极高 IOR 的小角度回归、直接构造闭包与后续参数修改的非法输入检查。

@@ -55,22 +55,20 @@ zig build run -Doptimize=ReleaseFast -- --scene materials --width 640 --samples 
 | `--shutter SECONDS` | 0.008 | 快门持续时间，主场景限制在 $(0,1]$ 秒 |
 | `--iso N` | 100 | 相对传感器增益，不模拟噪声 |
 | `--exposure EV` | 0 | 显示前线性曝光补偿，允许负值 |
-| `--fur-strands N` | 1800 | 随机场景大绒毛球毛束数，0 关闭细毛；最多 100000；摄影棚无毛束 |
 
-增大毛束数会显著增加几何数量和 BVH 构建成本；每束使用两个胶囊体。
 快门采样以秒为单位，场景运动区间与 BVH 均为 [0,1] 秒，禁止超出该区间。
 
 ## 2. 示例场景与实现边界
 
 [scene.loadRandomScene()](src/scene.zig) 保留棋盘地面和随机小球阵列，添加三颗展示球。
-默认视角中从左至右为**绒毛、体积玉石、水球**；部分随机小球也使用这些材质。
+默认视角中从左至右为**丝绸、体积玉石、水球**；部分随机小球也使用这些材质。
 其余小球使用不同金属度和粗糙度的 PBR 或光滑玻璃。大面积顶灯提供可采样高光。
 
 | 对象 | 实际实现 | 不包含 |
 | --- | --- | --- |
 | 水球 | `WavySphere` 静态隐式径向位移、真实轮廓/法线；IOR=1.333，精确 Fresnel、全反射及带 $\eta^2$ 的抛光折射 | 流体动力学、时变波浪、示例水的体吸收/散射、光谱响应 |
 | 体积玉石球 | 抛光电介质边界＋内部均匀 RGB 吸收、标量散射率与 HG 多次空间随机游走；真实厚度相关 SSS | 实测玉石参数、矿物纹理、非均匀介质、粗糙折射、解析 BSSRDF/扩散近似 |
-| 绒毛球 | 两段胶囊组成的弯曲细毛，真实轮廓和阴影，粗糙 GGX 表面 | 专用毛发 BSDF、纤维内部反射折射、毛发动力学 |
+| 丝绸球 | 各向异性 GGX（沿纤维切向平滑、副切向粗糙）＋保守漫反射预算；`base_color=(0.92,0.88,0.80)`、`roughness=0.25`、`anisotropy=0.75` | 完整 sheen 纤维散射瓣、织物实测数据、织造纹理 |
 | 粗糙金属/塑料 | GGX + Smith + Schlick，保守互易漫反射能量预算 | 完整 glTF/Disney 兼容、多次微表面散射补偿、复杂涂层 |
 
 两种场景的玉石均使用 **artist-chosen（美术选择，非实测）** 参数：
@@ -80,7 +78,7 @@ $\sigma_a=(0.65,0.10,0.32)\,\mathrm{m}^{-1}$、$\sigma_s=4\,\mathrm{m}^{-1}$、$
 中心长路径则更易散射、吸收，不能据此保证边缘一定比中心亮。详见 [厚度与参数](docs/subsurface.md)。
 
 [scene.loadMaterialScene()](src/scene.zig) 在暗地面、RGB=(0.008,0.008,0.008) 环境下并排展示左水右玉，
-使用顶侧柔光箱与背侧/侧面面灯，默认机位和对焦随预设切换，没有随机小球或毛束。
+使用顶侧柔光箱与背侧/侧面面灯，默认机位和对焦随预设切换，没有随机小球。
 它提供受控的参考观察环境，不保证复现某张参考图：**灯的尺寸、位置、背景、几何轮廓/厚度和曝光同样关键**，
 尤其透明水球不能只靠 IOR 复制参考外观。当前波场振幅比例为 0.045、频率为 14，不是法线贴图或流体模拟。
 
@@ -98,10 +96,10 @@ Zig 使用 `struct` 和带标签 `union`，没有传统继承式类。
 | 模块 | 主要类型/API | 职责 |
 | --- | --- | --- |
 | [main](src/main.zig) | `Options.parse`、`main` | 参数、物理相机、运行与输出 |
-| [scene](src/scene.zig) | `loadRandomScene`、`loadMaterialScene`、`addFur` | 示例材质、几何和灯光装配 |
+| [scene](src/scene.zig) | `loadRandomScene`、`loadMaterialScene` | 示例材质、几何和灯光装配 |
 | [render](src/render.zig) | `Scene`、`RenderParams`、`renderPixels`、`renderImage` | 场景容器、工作线程、像素累积和 PNG |
 | [camera](src/camera.zig) | `PhysicalCameraArgs`、`Camera` | 薄透镜射线、快门、相对曝光 |
-| [material](src/material.zig) | `Material`、`Pbr`、`Subsurface`、`Translucent` | 材质参数验证、BSDF 与内部介质查询 |
+| [material](src/material.zig) | `Material`、`Pbr`、`Silk`、`Subsurface`、`Translucent` | 材质参数验证、BSDF 与内部介质查询 |
 | [medium](src/medium.zig) | `Homogeneous` | RGB 吸收、标量散射自由程与 HG 相函数 |
 | [water](src/water.zig) | `WavySphere` | 静态隐式位移曲面、解析几何法线和有界求根 |
 | [bsdf](src/bsdf.zig) | `Surface`、`Sample` | `eval/pdf/sample`、GGX VNDF、Fresnel |
@@ -170,12 +168,14 @@ $$
 GGX 可见法线采样使用雅可比 $p_B(\omega_i)=p_h(h)/(4|\omega_o\cdot h|)$。
 VNDF 反射到无效半球时返回 null，必须保留为零贡献，**不能不断重试直到成功**。
 金属度混合得到 $F_0=(1-m)((\eta-1)/(\eta+1))^2+m\,baseColor$。
+丝绸/缎面使用各向异性 GGX：切向(u)与副切向(v)取不同 $\alpha$，切向为平滑纤维方向，`anisotropy` 越大高光越沿副切向拉长。
 漫反射使用双方向 Fresnel 上界构造保守互易预算；不直接将无衰减 Lambertian 与镜面相加。
 推导、能量界、采样密度和测试参考详见 [BSDF 文档](docs/bsdf.md)。
 
 | API | 参数与返回约定 |
 | --- | --- |
 | `newPbr(alloc, Pbr)` | 线性 `base_color`、`metallic`、`roughness` 在 [0,1]；校验 IOR；分配错误可传播 |
+| `newSilk(alloc, Silk)` | 线性 `base_color`、`roughness`、`anisotropy` 在 [0,1]；F0 由电介质 IOR 决定；各向异性 GGX |
 | `newMetal(alloc, color, roughness)` | 零粗糙度保留常色理想镜面，其余使用 GGX |
 | `newDielectric(alloc, ior)` | 空气/介质的光滑边界，透射权重含 $(\eta_i/\eta_t)^2$ |
 | `newSubsurface(alloc, Subsurface)` | 同样的抛光边界＋`medium.Homogeneous`；系数有限非负，$\lvert g\rvert<0.99$ |
@@ -262,7 +262,7 @@ $$
 ## 7. 加速、采样与稳定性
 
 - BVH 缓存子包围盒，最长质心轴中位划分，近子节点优先；单叶不重复求交。
-  当前仍为指针式 BVH，构建含插入排序，不适合无上限增加毛束，不是 SAH/扁平 BVH。
+  当前仍为指针式 BVH，构建含插入排序，不适合无上限增加图元，不是 SAH/扁平 BVH。
 - 默认线程数为逻辑 CPU 数，受行块数限制；默认每任务 8 行，调用线程也参与。
 - RNG 按像素和样本播种；同一构建与参数下，线程数/行块调度不改变输出。
 - Sobol 只用于胶片 2D、镜头 2D、快门 1D，八个随机数字平移副本；后续路径使用 PRNG。

@@ -174,11 +174,11 @@ pub fn newWavySphere(alloc: Allocator, center: Point3, radius: f64, amplitude: f
     return obj;
 }
 
-// @brief 分配有限圆柱和两个半球端帽组成的静态胶囊，用作真实毛束段几何。
+// @brief 分配有限圆柱和两个半球端帽组成的静态胶囊，用作细杆/纤维段几何。
 // @param start 轴线起点；end 为不同于起点的有限终点。
 // @param radius 有限且严格为正的半径；mat 为借用表面材质。
 // @return 对象或 InvalidCapsule/OutOfMemory；失败自动清理，成功由场景分配器管理。
-// @notice 这不是毛发散射模型；各向同性表面 BSDF 不描述纤维内部散射。
+// @notice 这不是毛发散射模型；普通表面 BSDF 不描述纤维内部散射。
 pub fn newCapsule(alloc: Allocator, start: Point3, end: Point3, radius: f64, mat: *material.Material) !*Object {
     const length = vectorLength(end.sub(start));
     if (!finiteVector(start) or !finiteVector(end) or !std.math.isFinite(radius) or radius <= 0 or

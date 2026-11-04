@@ -33,6 +33,7 @@ pub const Material = union(enum) {
     isotropic: *Isotropic,
     diffuse_light: *DiffuseLight,
     pbr: *Pbr,
+    silk: *Silk,
     translucent: *Translucent,
     subsurface: *Subsurface,
 
@@ -44,7 +45,7 @@ pub const Material = union(enum) {
             .dielectric => |m| m.scatter(r_in, rec, attenuation, scattered),
             .isotropic => |m| m.scatter(r_in, rec, attenuation, scattered),
             .diffuse_light => |m| m.scatter(r_in, rec, attenuation, scattered),
-            .pbr, .translucent, .subsurface => false,
+            .pbr, .silk, .translucent, .subsurface => false,
         };
     }
 
@@ -77,7 +78,7 @@ pub const Material = union(enum) {
     // @brief 是否含连续表面散射瓣；相函数与发光材质不在该接口内。
     pub fn hasNonDelta(self: Material) bool {
         return switch (self) {
-            .lambertian, .pbr, .translucent => true,
+            .lambertian, .pbr, .silk, .translucent => true,
             .metal => |m| m.fuzz > 0,
             else => false,
         };
@@ -109,6 +110,12 @@ pub const Material = union(enum) {
                 const r = (m.ior - 1) / (m.ior + 1);
                 const f0 = Color.init(r * r, r * r, r * r).scale(1 - m.metallic).add(m.base_color.scale(m.metallic));
                 break :blk .{ .diffuse = m.base_color.scale(1 - m.metallic), .specular = f0, .roughness = m.roughness };
+            },
+            .silk => |m| blk: {
+                if (!m.valid()) break :blk null;
+                const r = (m.ior - 1) / (m.ior + 1);
+                const f0 = Color.init(r * r, r * r, r * r);
+                break :blk .{ .diffuse = m.base_color, .specular = f0, .roughness = m.roughness, .anisotropy = m.anisotropy };
             },
             .translucent => |m| if (bsdf.validColor(m.color) and bsdf.validUnit(m.transmission))
                 .{ .diffuse = m.color, .transmission = m.transmission }
@@ -257,6 +264,31 @@ pub fn newPbr(alloc: Allocator, params: Pbr) CreateError!*Material {
     m.* = params;
     const mat = try alloc.create(Material);
     mat.* = .{ .pbr = m };
+    return mat;
+}
+
+// @brief 各向异性丝绸/缎面布料材质；沿切向纤维与副切向织造方向具有不同粗糙度。
+// @notice anisotropy 在 [0,1]，越大镜面高光越沿副切向（垂直纤维）拉长；F0 由电介质 IOR 决定，不含 sheen 纤维散射瓣。
+pub const Silk = struct {
+    base_color: Color,
+    roughness: f64,
+    anisotropy: f64 = 0,
+    ior: f64 = 1.5,
+
+    fn valid(self: Silk) bool {
+        return bsdf.validColor(self.base_color) and bsdf.validUnit(self.roughness) and bsdf.validUnit(self.anisotropy) and bsdf.validIor(self.ior);
+    }
+};
+
+// @brief 校验并分配各向异性丝绸材质；漫反射为 base_color，镜面 F0 取电介质 IOR 反射率。
+// @return 调用方拥有 Silk 参数对象与 Material 包装；非法参数或分配失败返回错误。
+pub fn newSilk(alloc: Allocator, params: Silk) CreateError!*Material {
+    if (!params.valid()) return error.InvalidParameter;
+    const m = try alloc.create(Silk);
+    errdefer alloc.destroy(m);
+    m.* = params;
+    const mat = try alloc.create(Material);
+    mat.* = .{ .silk = m };
     return mat;
 }
 

@@ -51,6 +51,7 @@ test "BSDF material sample eval pdf consistency in rotated world frame" {
         try material.newPbr(a, .{ .base_color = c, .metallic = 0.3, .roughness = 0.6 }),
         try material.newPbr(a, .{ .base_color = white, .metallic = 1, .roughness = 0 }),
         try material.newTranslucent(a, c, 0.7),
+        try material.newSilk(a, .{ .base_color = c, .roughness = 0.4, .anisotropy = 0.6 }),
     };
     const n = Vec3.init(1, 2, 3).normalized();
     var frame: math.Onb = .{};
@@ -115,6 +116,22 @@ test "BSDF GGX remains finite at grazing and minimum roughness" {
                 for (0..3) |c| try testing.expect(std.math.isFinite(s.weight.at(c)) and s.weight.at(c) <= 1.000001);
             };
         }
+    }
+}
+
+test "BSDF silk with zero anisotropy matches equivalent dielectric PBR" {
+    random.seed(818);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = Vec3.init(0.7, 0.5, 0.3);
+    const silk = try material.newSilk(a, .{ .base_color = base, .roughness = 0.4, .anisotropy = 0 });
+    const pbr = try material.newPbr(a, .{ .base_color = base, .metallic = 0, .roughness = 0.4 });
+    const rec = object.HitRecord{ .normal = normal };
+    for (0..256) |_| {
+        const wo = direction(random.randomDouble(), 2 * math.pi * random.randomDouble());
+        const wi = direction(random.randomDouble(), 2 * math.pi * random.randomDouble());
+        try expectColor(pbr.bsdfEval(.{ .direction = wo.neg() }, &rec, wi), silk.bsdfEval(.{ .direction = wo.neg() }, &rec, wi), 1e-12);
     }
 }
 
@@ -273,6 +290,9 @@ test "BSDF rejects invalid parameters and degenerate directions without silent N
         try testing.expectError(error.InvalidParameter, material.newPbr(a, .{ .base_color = .{ .z = bad }, .metallic = 0, .roughness = 0.5 }));
         try testing.expectError(error.InvalidParameter, material.newTranslucent(a, white, bad));
         try testing.expectError(error.InvalidParameter, material.newTranslucent(a, .{ .y = bad }, 0));
+        try testing.expectError(error.InvalidParameter, material.newSilk(a, .{ .base_color = white, .roughness = bad }));
+        try testing.expectError(error.InvalidParameter, material.newSilk(a, .{ .base_color = white, .roughness = 0.5, .anisotropy = bad }));
+        try testing.expectError(error.InvalidParameter, material.newSilk(a, .{ .base_color = .{ .x = bad }, .roughness = 0.5 }));
         try testing.expectError(error.InvalidParameter, material.newIsotropic(a, .{ .x = bad }));
         var solid = texture.SolidColor{ .color_value = .{ .x = bad } };
         var tex = texture.Texture{ .solid = &solid };
@@ -281,6 +301,7 @@ test "BSDF rejects invalid parameters and degenerate directions without silent N
     for ([_]f64{ 0, -1, 1e-9, 1e9, std.math.nan(f64), std.math.inf(f64) }) |bad| {
         try testing.expectError(error.InvalidParameter, material.newDielectric(a, bad));
         try testing.expectError(error.InvalidParameter, material.newPbr(a, .{ .base_color = white, .roughness = 0.5, .metallic = 0, .ior = bad }));
+        try testing.expectError(error.InvalidParameter, material.newSilk(a, .{ .base_color = white, .roughness = 0.5, .ior = bad }));
     }
     const surface = bsdf.Surface{ .diffuse = white };
     for ([_]Vec3{ .{}, .{ .z = std.math.nan(f64) }, .{ .x = std.math.inf(f64) }, normal.neg() }) |bad| {

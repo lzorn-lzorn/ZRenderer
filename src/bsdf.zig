@@ -114,40 +114,43 @@ pub fn sampleDielectric(wo_in: Vec3, n_in: Vec3, ior: f64, front_face: bool) ?Sa
     };
 }
 
-// @brief GGX 法线分布；使用切向平方避免锐利峰处的相消。
-// @method **从斜率到法线：** 令 $s=(h_x/h_z,h_y/h_z)$，GGX 斜率密度 $P_{22}(s)=\alpha^2/[\pi(\alpha^2+|s|^2)^2]$。
+// @brief 各向异性 GGX 法线分布；使用切向平方避免锐利峰处的相消。
+// @method **从斜率到法线：** 令 $s=(h_x/h_z,h_y/h_z)$，各向异性 GGX 斜率密度正比于 $1/[\alpha_x\alpha_y(1+s_x^2/\alpha_x^2+s_y^2/\alpha_y^2)^2]$。
 // @method $d^2s=d\omega_h/h_z^3$，投影法线概率 $P_{22}d^2s=D(h)h_zd\omega_h$，故 $D=P_{22}/h_z^4$。
-// @method $$D(h)=\frac{\alpha^2}{\pi(h_x^2+h_y^2+\alpha^2h_z^2)^2},\qquad\int_{\Omega^+}D(h)h_z\,d\omega_h=1.$$
-// @method D 本身不是立体角 PDF；以 $h_x^2+h_y^2$ 代替 $1-h_z^2$ 可保留极尖峰附近的小切向分量。
-fn distribution(h: Vec3, alpha: f64) f64 {
-    const a2 = alpha * alpha;
-    const d = h.x * h.x + h.y * h.y + a2 * h.z * h.z;
-    return a2 / (math.pi * d * d);
+// @method $$D(h)=\frac{1}{\pi\alpha_x\alpha_y\left(\frac{h_x^2}{\alpha_x^2}+\frac{h_y^2}{\alpha_y^2}+h_z^2\right)^2},\qquad\int_{\Omega^+}D(h)h_z\,d\omega_h=1.$$
+// @method D 本身不是立体角 PDF；以 $h_x^2+h_y^2$ 代替 $1-h_z^2$ 可保留极尖峰附近的小切向分量；$\alpha_x=\alpha_y$ 时退化为各向同性。
+fn distribution(h: Vec3, alpha_x: f64, alpha_y: f64) f64 {
+    const ax2 = alpha_x * alpha_x;
+    const ay2 = alpha_y * alpha_y;
+    const d = h.x * h.x / ax2 + h.y * h.y / ay2 + h.z * h.z;
+    return 1 / (math.pi * alpha_x * alpha_y * d * d);
 }
 
-// @brief 稳定计算 G1(c)/c，避免掠射方向的 0/0。
-// @method **Smith 单方向遮蔽：** $\Lambda(c)=[\sqrt{1+\alpha^2\tan^2\theta}-1]/2$，$G_1=1/(1+\Lambda)$。
-// @method 代入 $\tan^2\theta=(1-c^2)/c^2$，将 c 移入根号后得到无需先计算无穷 Lambda 的形式：
-// @method $$\frac{G_1(c)}c=\frac{2}{c+\sqrt{\alpha^2+(1-\alpha^2)c^2}},\quad\lim_{c\to0^+}\frac{G_1(c)}c=\frac2\alpha.$$
-// @method 此处 $c\in[0,1],\alpha\in[0.001,1]$；双方向采用分离式 $G_2=G_1(c_o)G_1(c_i)$，非高度相关 Smith。
-fn g1OverCos(c: f64, alpha: f64) f64 {
-    return 2 / (c + @sqrt(alpha * alpha + (1 - alpha * alpha) * c * c));
+// @brief 稳定计算各向异性 Smith 单方向遮蔽除以余弦 G1(v)/(n·v)，避免掠射方向的 0/0。
+// @param v 切向基下的单位方向，v.z=n·v>0；alpha_x/y 沿两条切向轴。
+// @method **Smith 单方向遮蔽：** $\Lambda(v)=[\sqrt{1+(\alpha_x^2v_x^2+\alpha_y^2v_y^2)/v_z^2}-1]/2$，$G_1=1/(1+\Lambda)$。
+// @method 将 v_z 移入根号得到无需先计算无穷 Lambda 的稳定形式：
+// @method $$\frac{G_1(v)}{v_z}=\frac{2}{v_z+\sqrt{v_z^2+\alpha_x^2v_x^2+\alpha_y^2v_y^2}},\quad\lim_{v_z\to0^+}\frac{G_1(v)}{v_z}\le\frac2{\min(\alpha_x,\alpha_y)}.$$
+// @method $\alpha_x=\alpha_y=\alpha$ 时退化为 $2/(c+\sqrt{\alpha^2+(1-\alpha^2)c^2})$；双方向采用分离式 $G_2=G_1(v_o)G_1(v_i)$，非高度相关 Smith。
+fn g1OverCos(v: Vec3, alpha_x: f64, alpha_y: f64) f64 {
+    const c = v.z;
+    return 2 / (c + @sqrt(c * c + alpha_x * alpha_x * v.x * v.x + alpha_y * alpha_y * v.y * v.y));
 }
 
 fn local(frame: math.Onb, v: Vec3) Vec3 {
     return .{ .x = v.dot(frame.u()), .y = v.dot(frame.v()), .z = v.dot(frame.w()) };
 }
 
-// @brief Heitz 可见法线采样：拉伸视线、投影圆盘、再反向拉伸。
+// @brief Heitz 可见法线采样（各向异性）：分别以 alpha_x/y 拉伸视线、投影圆盘、再反向拉伸。
 // @notice 不重采样落到下半球的反射；其概率质量必须作为 null 事件保留。
-// @method **VNDF（可见法线分布）：** $v_h=\operatorname{normalize}(\alpha\omega_{ox},\alpha\omega_{oy},c_o)$ 把 GGX 化为单位粗糙度。
+// @method **VNDF（可见法线分布）：** $v_h=\operatorname{normalize}(\alpha_x\omega_{ox},\alpha_y\omega_{oy},c_o)$ 把各向异性 GGX 化为单位粗糙度。
 // @method 围绕 vh 建立切向基，以 $r=\sqrt{u_1},\phi=2\pi u_2$ 均匀采样投影圆盘 $(x,y)$。
 // @method 可见半球投影的裁剪由 $s=(1+v_{hz})/2$ 与 $y\leftarrow(1-s)\sqrt{1-x^2}+sy$ 实现，再提升到球面 nh。
-// @method 反向映射 $h=\operatorname{normalize}(\alpha n_{hx},\alpha n_{hy},\max(0,n_{hz}))$，所得密度为
+// @method 反向映射 $h=\operatorname{normalize}(\alpha_x n_{hx},\alpha_y n_{hy},\max(0,n_{hz}))$，所得密度为
 // @method $$p_h(h\mid\omega_o)=\frac{D(h)G_1(c_o)\max(0,\omega_o\cdot h)}{c_o},\quad h_z\ge0.$$
-// @method 这是投影到观察方向的微表面积，经 G1 归一化；并非 $D(h)h_z$ 的普通法线采样。
-fn sampleVisibleNormal(wo: Vec3, alpha: f64) Vec3 {
-    const vh = Vec3.init(alpha * wo.x, alpha * wo.y, wo.z).normalized();
+// @method 这是投影到观察方向的微表面积，经 G1 归一化；并非 $D(h)h_z$ 的普通法线采样。$\alpha_x=\alpha_y$ 时退化为各向同性。
+fn sampleVisibleNormal(wo: Vec3, alpha_x: f64, alpha_y: f64) Vec3 {
+    const vh = Vec3.init(alpha_x * wo.x, alpha_y * wo.y, wo.z).normalized();
     const lensq = vh.x * vh.x + vh.y * vh.y;
     const t1 = if (lensq > 0) Vec3.init(-vh.y, vh.x, 0).scale(1 / @sqrt(lensq)) else Vec3.init(1, 0, 0);
     const t2 = vh.cross(t1);
@@ -158,7 +161,7 @@ fn sampleVisibleNormal(wo: Vec3, alpha: f64) Vec3 {
     const s = 0.5 * (1 + vh.z);
     y = (1 - s) * @sqrt(@max(0, 1 - x * x)) + s * y;
     const nh = t1.scale(x).add(t2.scale(y)).add(vh.scale(@sqrt(@max(0, 1 - x * x - y * y))));
-    return Vec3.init(alpha * nh.x, alpha * nh.y, @max(0, nh.z)).normalized();
+    return Vec3.init(alpha_x * nh.x, alpha_y * nh.y, @max(0, nh.z)).normalized();
 }
 
 // @brief 所有上半球 wi 对应的 Fresnel 上界；用于保守且互易的漫反射预算。
@@ -185,14 +188,20 @@ pub const Surface = struct {
     specular: ?Color = null,
     roughness: f64 = 0.5,
     transmission: f64 = 0,
+    anisotropy: f64 = 0,
 
     fn valid(self: Surface) bool {
-        return validColor(self.diffuse) and validUnit(self.roughness) and validUnit(self.transmission) and
+        return validColor(self.diffuse) and validUnit(self.roughness) and validUnit(self.transmission) and validUnit(self.anisotropy) and
             (if (self.specular) |f0| validColor(f0) and self.transmission == 0 else true);
     }
 
-    fn alpha(self: Surface) f64 {
-        return @max(0.001, self.roughness * self.roughness);
+    // @brief 各向异性 GGX 沿切向(u)/副切向(v)的粗糙度 alpha；anisotropy=0 时二者相等。
+    // @method 采用 Principled 的 aspect 映射：$\alpha_x=\alpha\sqrt{1-0.9a}$、$\alpha_y=\alpha/\sqrt{1-0.9a}$，$\alpha=\max(0.001,roughness^2)$。
+    // @method 切向(u)为平滑的纤维方向，anisotropy 越大高光越沿副切向(v)拉长。
+    fn alphas(self: Surface) struct { x: f64, y: f64 } {
+        const a = @max(0.001, self.roughness * self.roughness);
+        const aspect = @sqrt(@max(0.001, 1 - 0.9 * self.anisotropy));
+        return .{ .x = @max(0.001, a * aspect), .y = @max(0.001, a / aspect) };
     }
 
     fn specProbability(self: Surface) f64 {
@@ -221,8 +230,10 @@ pub const Surface = struct {
         const h = unit(wo.add(wi)) orelse return diffuse;
         var frame: math.Onb = .{};
         frame.buildFromW(n);
-        const a = self.alpha();
-        const spec = fresnelSchlick(f0, wo.dot(h)).scale(distribution(local(frame, h), a) * g1OverCos(co, a) * g1OverCos(ci, a) / 4);
+        const a = self.alphas();
+        const wo_l = local(frame, wo);
+        const wi_l = local(frame, wi);
+        const spec = fresnelSchlick(f0, wo.dot(h)).scale(distribution(local(frame, h), a.x, a.y) * g1OverCos(wo_l, a.x, a.y) * g1OverCos(wi_l, a.x, a.y) / 4);
         return diffuse.add(spec);
     }
 
@@ -248,7 +259,8 @@ pub const Surface = struct {
         const h = unit(wo.add(wi)) orelse return diffuse;
         var frame: math.Onb = .{};
         frame.buildFromW(n);
-        return diffuse + p * distribution(local(frame, h), self.alpha()) * g1OverCos(co, self.alpha()) / 4;
+        const a = self.alphas();
+        return diffuse + p * distribution(local(frame, h), a.x, a.y) * g1OverCos(local(frame, wo), a.x, a.y) / 4;
     }
 
     // @brief 返回世界空间样本；权重使用完整 eval/pdf，而非仅被选中的瓣。
@@ -265,7 +277,8 @@ pub const Surface = struct {
         frame.buildFromW(n);
         var wi: Vec3 = undefined;
         if (random.randomDouble() < self.specProbability()) {
-            const h = frame.local(sampleVisibleNormal(local(frame, wo), self.alpha()));
+            const a = self.alphas();
+            const h = frame.local(sampleVisibleNormal(local(frame, wo), a.x, a.y));
             wi = unit(math.reflect(wo.neg(), h)) orelse return null;
             if (wi.dot(n) <= 0) return null;
         } else {

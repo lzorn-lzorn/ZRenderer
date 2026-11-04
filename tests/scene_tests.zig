@@ -6,27 +6,22 @@ const object = @import("zrenderer").object;
 const color = @import("zrenderer").color;
 const testing = std.testing;
 
-// @brief 小毛束场景验证实际 PBR 类型、光源注册和可复现的几何，而非仅测试构造函数。
-test "scene includes deterministic PBR water jade fur and area emitter" {
+// @brief 验证实际 PBR 类型、光源注册和可复现的几何，而非仅测试构造函数。
+test "scene includes deterministic PBR water jade silk and area emitter" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const first = try scene.loadRandomScene(a, .{ .fur_strands = 4 });
-    const second = try scene.loadRandomScene(a, .{ .fur_strands = 4 });
+    const first = try scene.loadRandomScene(a, .{});
+    const second = try scene.loadRandomScene(a, .{});
     try testing.expect(first.light != null);
     try testing.expect(first.world.list.items[first.world.list.items.len - 1] == first.light.?);
     try testing.expectEqual(first.world.list.items.len, second.world.list.items.len);
-    var capsules: usize = 0;
     var water: usize = 0;
     var jade: usize = 0;
     var pbr: usize = 0;
+    var silk: usize = 0;
     for (first.world.list.items, second.world.list.items) |lhs, rhs| {
         try testing.expectEqual(std.meta.activeTag(lhs.*), std.meta.activeTag(rhs.*));
-        if (lhs.* == .capsule) {
-            capsules += 1;
-            try testing.expectEqual(lhs.capsule.start, rhs.capsule.start);
-            try testing.expectEqual(lhs.capsule.end, rhs.capsule.end);
-        }
         if (lhs.* == .wavy_sphere) {
             water += 1;
             try testing.expectEqual(lhs.wavy_sphere.center, rhs.wavy_sphere.center);
@@ -43,16 +38,18 @@ test "scene includes deterministic PBR water jade fur and area emitter" {
                 },
                 .translucent => return error.SceneUsesThinTranslucentJade,
                 .pbr => pbr += 1,
+                .silk => {
+                    silk += 1;
+                    try expectSilk(lhs);
+                },
                 else => {},
             }
         }
     }
-    try testing.expect(capsules >= 8 and capsules <= 16);
     try testing.expect(water >= 2 and jade >= 2 and pbr > 100);
+    try testing.expect(silk >= 1);
     var rec: object.HitRecord = .{};
     try testing.expect(first.bvh.hit(math.Ray.init(.{ .x = 3, .y = 0.9 }, .{ .x = -1 }, 0), 0, math.infinity, &rec));
-    const bare = try scene.loadRandomScene(a, .{ .fur_strands = 0 });
-    for (bare.world.list.items) |obj| try testing.expect(obj.* != .capsule);
 }
 
 // @brief 验证实际几何标签、波场参数及普通介电界面，不接受仅改法线的光滑球。
@@ -78,7 +75,18 @@ fn expectJade(obj: *object.Object) !void {
     try testing.expectEqual(@as(f64, 0.35), jade.medium.g);
 }
 
-// @brief 用独立的水平投影距离检查保守分离；运动球整个扫掠与毛束胶囊均包含在检查内。
+// @brief 丝绸必须有各向异性布料材质及固定的美术参数，而非复用普通 PBR 或毛发。
+fn expectSilk(obj: *object.Object) !void {
+    try testing.expect(obj.* == .sphere);
+    try testing.expect(obj.sphere.material.* == .silk);
+    const silk = obj.sphere.material.silk;
+    try testing.expectEqual(math.Color.init(0.92, 0.88, 0.80), silk.base_color);
+    try testing.expectEqual(@as(f64, 0.25), silk.roughness);
+    try testing.expectEqual(@as(f64, 0.75), silk.anisotropy);
+    try testing.expectEqual(@as(f64, 1.5), silk.ior);
+}
+
+// @brief 用独立的水平投影距离检查保守分离；运动球整个扫掠均包含在检查内。
 fn expectSeparated(objects: []const *object.Object) !void {
     for (objects) |hero| {
         const is_water = hero.* == .wavy_sphere;
@@ -103,11 +111,6 @@ fn expectSeparated(objects: []const *object.Object) !void {
                     q = w.center;
                     r = w.radius * (1 + w.amplitude);
                 },
-                .capsule => |c| {
-                    p = c.start;
-                    q = c.end;
-                    r = c.radius;
-                },
                 else => continue,
             }
             p.y = 0;
@@ -120,11 +123,11 @@ fn expectSeparated(objects: []const *object.Object) !void {
     }
 }
 
-test "scene protected water and jade never overlap swept spheres or fur" {
+test "scene protected water and jade never overlap swept spheres" {
     for ([_]u64{ 1, 42, 2026 }) |seed| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
-        const s = try scene.loadRandomScene(arena.allocator(), .{ .seed = seed, .fur_strands = 16 });
+        const s = try scene.loadRandomScene(arena.allocator(), .{ .seed = seed });
         try expectSeparated(s.world.list.items);
     }
 }
@@ -210,17 +213,15 @@ test "scene CLI validates presets and preserves explicit camera overrides in eit
     try testing.expectError(error.MissingOptionValue, main.Options.parse(&.{"--scene"}));
 }
 
-test "physical camera and fur CLI accepts values and rejects invalid input" {
-    const o = try main.Options.parse(&.{ "--focal-length", "85", "--f-number", "2", "--focus-distance", "5", "--shutter", "0.01", "--iso", "200", "--exposure", "-1", "--fur-strands", "0" });
+test "physical camera CLI accepts values and rejects invalid input" {
+    const o = try main.Options.parse(&.{ "--focal-length", "85", "--f-number", "2", "--focus-distance", "5", "--shutter", "0.01", "--iso", "200", "--exposure", "-1" });
     try testing.expectEqual(@as(f64, 85), o.focal_length_mm);
     try testing.expectEqual(@as(f64, 2), o.f_number);
     try testing.expectEqual(@as(f64, -1), o.exposure_compensation);
-    try testing.expectEqual(@as(usize, 0), o.fur_strands);
     try testing.expectError(error.InvalidCameraParameter, main.Options.parse(&.{ "--iso", "nan" }));
     try testing.expectError(error.InvalidCameraParameter, main.Options.parse(&.{ "--f-number", "0" }));
     try testing.expectError(error.InvalidCameraParameter, main.Options.parse(&.{ "--shutter", "-1" }));
     try testing.expectError(error.ShutterOutsideSceneInterval, main.Options.parse(&.{ "--shutter", "2" }));
-    try testing.expectError(error.InvalidFurCount, main.Options.parse(&.{ "--fur-strands", "100001" }));
     try testing.expectError(error.MissingOptionValue, main.Options.parse(&.{"--exposure"}));
 }
 
