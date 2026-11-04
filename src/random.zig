@@ -3,11 +3,17 @@ const math = @import("math.zig");
 const Vec3 = math.Vec3;
 const Point3 = math.Point3;
 
-var prng = std.Random.DefaultPrng.init(0x1234_5678_9abc_def0);
-var rnd = prng.random();
+pub const default_seed: u64 = 0x1234_5678_9abc_def0;
+
+// Each native worker owns its sampler; no shared mutable RNG or sampling lock.
+threadlocal var prng = std.Random.DefaultPrng.init(default_seed);
+
+pub fn seed(value: u64) void {
+    prng = std.Random.DefaultPrng.init(value);
+}
 
 pub fn randomDouble() f64 {
-    return rnd.float(f64);
+    return prng.random().float(f64);
 }
 
 pub fn randomDoubleRange(min: f64, max: f64) f64 {
@@ -27,7 +33,7 @@ pub fn randomUnitVec() Vec3 {
 }
 
 pub fn randomInt(min: i32, max: i32) i32 {
-    return @intFromFloat(randomDoubleRange(@floatFromInt(min), @floatFromInt(max) + 1.0));
+    return prng.random().intRangeAtMost(i32, min, max);
 }
 
 pub fn randomInUnitSphere() Point3 {

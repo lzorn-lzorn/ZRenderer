@@ -23,18 +23,26 @@ pub const Texture = union(enum) {
     }
 };
 
-pub fn newSolid(alloc: Allocator, c: Color) *Texture {
-    const s = alloc.create(SolidColor);
+pub fn newSolid(alloc: Allocator, c: Color) Allocator.Error!*Texture {
+    const s = try alloc.create(SolidColor);
+    errdefer alloc.destroy(s);
     s.* = .{ .color_value = c };
-    const t = alloc.create(Texture);
+    const t = try alloc.create(Texture);
     t.* = .{ .solid = s };
     return t;
 }
 
-pub fn newCheckerColors(alloc: Allocator, c1: Color, c2: Color) *Texture {
-    const ch = alloc.create(CheckerTexture);
-    ch.* = .{ .even = newSolid(alloc, c1), .odd = newSolid(alloc, c2) };
-    const t = alloc.create(Texture);
+pub fn newCheckerColors(alloc: Allocator, c1: Color, c2: Color) Allocator.Error!*Texture {
+    const ch = try alloc.create(CheckerTexture);
+    errdefer alloc.destroy(ch);
+    const t = try alloc.create(Texture);
+    errdefer alloc.destroy(t);
+    const even = try newSolid(alloc, c1);
+    errdefer {
+        alloc.destroy(even.solid);
+        alloc.destroy(even);
+    }
+    ch.* = .{ .even = even, .odd = try newSolid(alloc, c2) };
     t.* = .{ .checker = ch };
     return t;
 }
@@ -94,6 +102,11 @@ pub const ImageTexture = struct {
         }
         self.bytes_per_scanline = self.bytes_per_pixel * self.width;
         return self;
+    }
+
+    pub fn deinit(self: *ImageTexture) void {
+        if (self.data) |data| stb.stbi_image_free(data);
+        self.* = .{};
     }
 
     pub fn value(self: ImageTexture, u_in: f64, v_in: f64, p: Point3) Color {

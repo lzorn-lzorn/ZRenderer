@@ -7,7 +7,6 @@ const object = @import("object.zig");
 
 const Color = math.Color;
 const Ray = math.Ray;
-const Vec3 = math.Vec3;
 const Point3 = math.Point3;
 const Onb = math.Onb;
 const Texture = texture.Texture;
@@ -81,34 +80,39 @@ pub const Material = union(enum) {
     }
 };
 
-pub fn newLambertian(alloc: Allocator, alb: *Texture) *Material {
-    const m = alloc.create(Lambertian);
+pub fn newLambertian(alloc: Allocator, alb: *Texture) Allocator.Error!*Material {
+    const m = try alloc.create(Lambertian);
+    errdefer alloc.destroy(m);
     m.* = .{ .albedo = alb };
-    const mat = alloc.create(Material);
+    const mat = try alloc.create(Material);
     mat.* = .{ .lambertian = m };
     return mat;
 }
 
-pub fn newMetal(alloc: Allocator, a: Color, f: f64) *Material {
-    const m = alloc.create(Metal);
+pub fn newMetal(alloc: Allocator, a: Color, f: f64) Allocator.Error!*Material {
+    const m = try alloc.create(Metal);
+    errdefer alloc.destroy(m);
     m.* = .{ .albedo = a, .fuzz = if (f < 1) f else 1 };
-    const mat = alloc.create(Material);
+    const mat = try alloc.create(Material);
     mat.* = .{ .metal = m };
     return mat;
 }
 
-pub fn newDielectric(alloc: Allocator, ir: f64) *Material {
-    const m = alloc.create(Dielectric);
+pub fn newDielectric(alloc: Allocator, ir: f64) Allocator.Error!*Material {
+    const m = try alloc.create(Dielectric);
+    errdefer alloc.destroy(m);
     m.* = .{ .ir = ir };
-    const mat = alloc.create(Material);
+    const mat = try alloc.create(Material);
     mat.* = .{ .dielectric = m };
     return mat;
 }
 
-pub fn newIsotropic(alloc: Allocator, c: Color) *Material {
-    const m = alloc.create(Isotropic);
-    m.* = .{ .albedo = texture.newSolid(alloc, c) };
-    const mat = alloc.create(Material);
+pub fn newIsotropic(alloc: Allocator, c: Color) Allocator.Error!*Material {
+    const m = try alloc.create(Isotropic);
+    errdefer alloc.destroy(m);
+    const mat = try alloc.create(Material);
+    errdefer alloc.destroy(mat);
+    m.* = .{ .albedo = try texture.newSolid(alloc, c) };
     mat.* = .{ .isotropic = m };
     return mat;
 }

@@ -1,63 +1,78 @@
 # ZRenderer
 
-A Zig **0.17.0** project with a working Vulkan binding. For now the program just
-prints `helloworld`, but it also creates a real `VkInstance`, enumerates the
-machine's physical devices and tears the instance down cleanly — proving the
-binding compiles *and* runs against the installed Vulkan loader/driver.
+A CPU path tracer written in Zig **0.17**, verified with **0.17.1** on Windows.
+It renders a random sphere scene with diffuse, metal and dielectric materials,
+using a BVH for acceleration, and saves the result as `random_scene.png`.
 
 ## Requirements
 
-- Zig `0.17.0` (the shell's `zig` may still point at 0.16; use the 0.17 binary,
-  e.g. `E:\zig-x86_64-windows-0.17.0\zig.exe`).
-- The Vulkan SDK installed at `E:\Vulkan` (or override with `-Dvulkan-sdk=`).
-- A Vulkan-capable GPU/driver (loader `vulkan-1.dll` in `C:\Windows\System32`).
+- Zig 0.17 on `PATH` (tested with 0.17.1).
+- No additional packages or Vulkan SDK are needed for the current renderer.
+  The bundled stb C implementation is compiled and linked by the build script.
 
 ## Build & run
 
 ```powershell
-E:\zig-x86_64-windows-0.17.0\zig.exe build run
+zig build
+zig build run -Doptimize=ReleaseFast
 ```
 
-Example output:
+The executable is installed to `zig-out/bin/`. The default render uses a
+600-pixel-wide image and 100 samples per pixel, so a complete render can take
+time. Progress and elapsed time are written to stderr.
 
-```
-helloworld
-Vulkan instance created; 2 physical device(s) found
-  - NVIDIA GeForce RTX 5070 Ti
-  - AMD Radeon(TM) Graphics
-```
+### Parallel rendering
 
-`helloworld` is written to stdout; the Vulkan diagnostics go to stderr.
-
-To just build the executable (placed in `zig-out\bin\zrenderer.exe`):
+Rendering defaults to the available logical CPU count, capped by the number of
+row blocks. Workers dynamically claim blocks of 8 rows and write disjoint parts
+of one RGB buffer. The main thread also renders; PNG encoding happens once after
+all workers finish. Scene construction and PNG encoding remain single-threaded.
 
 ```powershell
-E:\zig-x86_64-windows-0.17.0\zig.exe build
+zig build run -Doptimize=ReleaseFast -- --threads 8
+zig build run -Doptimize=ReleaseFast -- --threads 1
+zig build run -Doptimize=ReleaseFast -- --threads 0
 ```
+
+`--threads 0` selects automatically; `--threads 1` provides a serial baseline.
+Use an optimized build for performance comparisons, not the default Debug build.
+`--help` prints usage without rendering. Relative output paths remain relative
+to the working directory; the default output is still `random_scene.png`.
+
+Each native thread has its own RNG. Sampling is seeded per output row, so the
+same scene, render seed and settings produce identical pixels regardless of
+worker count or block scheduling (within the same build). This changes the old
+global-RNG sample sequence, but does not change the sampling quality settings.
+`RenderParams` also exposes `rows_per_task` and `seed` for programmatic control.
+The scene, materials and textures must not be mutated during a render.
+
+## Tests
+
+```powershell
+zig build test
+zig build test -Doptimize=ReleaseSafe
+zig build test "-Dtest-filter=BVH"
+```
+
+Tests cover public API compilation, allocation failures, random ranges,
+geometry, BVH construction, noise, timing and PNG render/readback. Parallel
+regressions verify byte-identical pixels across worker counts and block sizes,
+thread-local RNG isolation, partial row blocks, PNG orientation, allocation
+cleanup and CLI validation.
+Temporary PNG files are cleaned up automatically. Scene objects use an arena
+allocator; image textures loaded through stb must be released with `deinit()`.
+
+The workspace config routes VS Code's Zig test runner through `zig build test`
+so that tests link the same stb implementation as the application.
 
 ## Layout
 
-- `src/main.zig` — entry point: prints `helloworld`, creates a Vulkan instance,
-  enumerates physical devices, destroys the instance.
-- `src/vulkan.zig` — the generated Vulkan binding (see below).
-- `build.zig` — wires up the Vulkan SDK include path, import library
-  (`vulkan-1.lib`) and the `run` step.
-
-## Regenerating the binding
-
-`src/vulkan.zig` is generated from the SDK's `vulkan/vulkan.h` with the Zig
-0.17.0 C-translation CLI (`@cImport` was removed in 0.17.0):
-
-```powershell
-E:\zig-x86_64-windows-0.17.0\zig.exe translate-c -I "E:\Vulkan\Include" "E:\Vulkan\Include\vulkan\vulkan.h" > src\vulkan.zig
-```
-
-If your shell adds a UTF-8 BOM to the redirect, strip the leading `EF BB BF`
-bytes before building (Zig rejects the BOM).
-
-## Notes
-
-- `build.zig` accepts `-Dvulkan-sdk=<path>` to point at a non-default SDK
-  location (default `E:/Vulkan`).
-- The binding is linked against `vulkan-1.lib`, which resolves to the system
-  loader `vulkan-1.dll` at runtime.
+- `src/main.zig` — scene construction and application entry point.
+- `src/render.zig`, `src/color.zig` — rendering, timing and light transport.
+- `src/object.zig`, `src/material.zig`, `src/texture.zig` — scene primitives.
+- `src/math.zig`, `src/random.zig`, `src/noise.zig`, `src/pdf.zig` — sampling and math.
+- `src/camera.zig` — camera and ray generation.
+- `src/stb.zig`, `src/stb_impl.c` — image loading and PNG output.
+- `src/tests.zig` — regression tests.
+- `src/vulkan.zig` — retained generated Vulkan binding; not used by this build.
+- `build.zig` — build, run and test steps, with C compiler warnings enabled.

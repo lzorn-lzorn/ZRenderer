@@ -1,8 +1,7 @@
 const std = @import("std");
 const math = @import("math.zig");
-const random = @import("random.zig");
+const rng = @import("random.zig");
 const material = @import("material.zig");
-const texture = @import("texture.zig");
 
 const Point3 = math.Point3;
 const Vec3 = math.Vec3;
@@ -92,40 +91,44 @@ pub const Object = union(enum) {
 
 // ---------------------------------------------------------------- helpers
 
-pub fn newSphere(alloc: Allocator, cen0: Point3, cen1: Point3, t0: f64, t1: f64, r: f64, m: *material.Material) *Object {
-    const s = alloc.create(Sphere);
+pub fn newSphere(alloc: Allocator, cen0: Point3, cen1: Point3, t0: f64, t1: f64, r: f64, m: *material.Material) Allocator.Error!*Object {
+    const s = try alloc.create(Sphere);
+    errdefer alloc.destroy(s);
     s.* = Sphere.init(cen0, cen1, t0, t1, r, m);
-    const o = alloc.create(Object);
+    const o = try alloc.create(Object);
     o.* = .{ .sphere = s };
     return o;
 }
 
-pub fn newXyRect(alloc: Allocator, x0: f64, x1: f64, y0: f64, y1: f64, k: f64, m: *material.Material) *Object {
-    const s = alloc.create(XyRect);
+pub fn newXyRect(alloc: Allocator, x0: f64, x1: f64, y0: f64, y1: f64, k: f64, m: *material.Material) Allocator.Error!*Object {
+    const s = try alloc.create(XyRect);
+    errdefer alloc.destroy(s);
     s.* = .{ .x0 = x0, .x1 = x1, .y0 = y0, .y1 = y1, .k = k, .material = m };
-    const o = alloc.create(Object);
+    const o = try alloc.create(Object);
     o.* = .{ .xy_rect = s };
     return o;
 }
 
-pub fn newXzRect(alloc: Allocator, x0: f64, x1: f64, z0: f64, z1: f64, k: f64, m: *material.Material) *Object {
-    const s = alloc.create(XzRect);
+pub fn newXzRect(alloc: Allocator, x0: f64, x1: f64, z0: f64, z1: f64, k: f64, m: *material.Material) Allocator.Error!*Object {
+    const s = try alloc.create(XzRect);
+    errdefer alloc.destroy(s);
     s.* = .{ .x0 = x0, .x1 = x1, .z0 = z0, .z1 = z1, .k = k, .material = m };
-    const o = alloc.create(Object);
+    const o = try alloc.create(Object);
     o.* = .{ .xz_rect = s };
     return o;
 }
 
-pub fn newYzRect(alloc: Allocator, y0: f64, y1: f64, z0: f64, z1: f64, k: f64, m: *material.Material) *Object {
-    const s = alloc.create(YzRect);
+pub fn newYzRect(alloc: Allocator, y0: f64, y1: f64, z0: f64, z1: f64, k: f64, m: *material.Material) Allocator.Error!*Object {
+    const s = try alloc.create(YzRect);
+    errdefer alloc.destroy(s);
     s.* = .{ .y0 = y0, .y1 = y1, .z0 = z0, .z1 = z1, .k = k, .material = m };
-    const o = alloc.create(Object);
+    const o = try alloc.create(Object);
     o.* = .{ .yz_rect = s };
     return o;
 }
 
-fn wrapBvh(alloc: Allocator, node: *BvhNode) *Object {
-    const o = alloc.create(Object);
+fn wrapBvh(alloc: Allocator, node: *BvhNode) Allocator.Error!*Object {
+    const o = try alloc.create(Object);
     o.* = .{ .bvh = node };
     return o;
 }
@@ -137,11 +140,11 @@ pub const ObjectGroup = struct {
     list: std.ArrayList(*Object),
 
     pub fn init(alloc: Allocator) ObjectGroup {
-        return .{ .alloc = alloc, .list = std.ArrayList(*Object).init(alloc) };
+        return .{ .alloc = alloc, .list = .empty };
     }
 
     pub fn add(self: *ObjectGroup, obj: *Object) !void {
-        try self.list.append(obj);
+        try self.list.append(self.alloc, obj);
     }
 
     pub fn clear(self: *ObjectGroup) void {
@@ -188,7 +191,7 @@ pub const ObjectGroup = struct {
     pub fn random(self: ObjectGroup, o: Point3) Vec3 {
         const n = self.list.items.len;
         if (n == 0) return Vec3.init(1, 0, 0);
-        const idx: usize = @intCast(random.randomInt(0, @intCast(n - 1)));
+        const idx: usize = @intCast(rng.randomInt(0, @intCast(n - 1)));
         return self.list.items[idx].random(o);
     }
 };
@@ -251,7 +254,7 @@ pub const Sphere = struct {
 
     pub fn pdfValue(self: Sphere, o: Point3, v: Vec3) f64 {
         var rec: HitRecord = .{};
-        if (!self.hit(Ray.init(o, v), 0.001, math.infinity, &rec)) return 0;
+        if (!self.hit(Ray.init(o, v, self.time0), 0.001, math.infinity, &rec)) return 0;
         const cos_theta_max = @sqrt(1.0 - self.radius * self.radius / self.center0.sub(o).lengthSquared());
         const solid_angle = 2.0 * math.pi * (1.0 - cos_theta_max);
         return 1.0 / solid_angle;
@@ -262,7 +265,7 @@ pub const Sphere = struct {
         const distance_squared = direction.lengthSquared();
         var uvw: Onb = .{};
         uvw.buildFromW(direction);
-        return uvw.local(random.randomToSphere(self.radius, distance_squared));
+        return uvw.local(rng.randomToSphere(self.radius, distance_squared));
     }
 
     pub fn center(self: Sphere, time: f64) Point3 {
@@ -281,8 +284,8 @@ pub const Sphere = struct {
     }
 
     fn getSphereUv(p: Point3, u: *f64, v: *f64) void {
-        const theta = @acos(-p.y);
-        const phi = @atan2(-p.z, p.x) + math.pi;
+        const theta = std.math.acos(-p.y);
+        const phi = std.math.atan2(-p.z, p.x) + math.pi;
         u.* = phi * 0.5 / math.pi;
         v.* = theta / math.pi;
     }
@@ -353,7 +356,7 @@ pub const XzRect = struct {
 
     pub fn pdfValue(self: XzRect, origin: Point3, v: Vec3) f64 {
         var rec: HitRecord = .{};
-        if (!self.hit(Ray.init(origin, v), 0.001, math.infinity, &rec)) return 0;
+        if (!self.hit(Ray.init(origin, v, 0), 0.001, math.infinity, &rec)) return 0;
         const area = (self.x1 - self.x0) * (self.z1 - self.z0);
         const distance_squared = rec.t * rec.t * v.lengthSquared();
         const cosine = @abs(v.dot(rec.normal) / v.length());
@@ -361,7 +364,7 @@ pub const XzRect = struct {
     }
 
     pub fn random(self: XzRect, origin: Point3) Vec3 {
-        const random_point = Point3.init(random.randomDoubleRange(self.x0, self.x1), self.k, random.randomDoubleRange(self.z0, self.z1));
+        const random_point = Point3.init(rng.randomDoubleRange(self.x0, self.x1), self.k, rng.randomDoubleRange(self.z0, self.z1));
         return random_point.sub(origin);
     }
 };
@@ -406,12 +409,12 @@ pub const Box = struct {
 
     pub fn init(alloc: Allocator, p0: Point3, p1: Point3, m: *material.Material) !Box {
         var self = Box{ .box_min = p0, .box_max = p1, .sides = ObjectGroup.init(alloc) };
-        try self.sides.add(newXyRect(alloc, p0.x, p1.x, p0.y, p1.y, p1.z, m));
-        try self.sides.add(newXyRect(alloc, p0.x, p1.x, p0.y, p1.y, p0.z, m));
-        try self.sides.add(newXzRect(alloc, p0.x, p1.x, p0.z, p1.z, p1.y, m));
-        try self.sides.add(newXzRect(alloc, p0.x, p1.x, p0.z, p1.z, p0.y, m));
-        try self.sides.add(newYzRect(alloc, p0.y, p1.y, p0.z, p1.z, p1.x, m));
-        try self.sides.add(newYzRect(alloc, p0.y, p1.y, p0.z, p1.z, p0.x, m));
+        try self.sides.add(try newXyRect(alloc, p0.x, p1.x, p0.y, p1.y, p1.z, m));
+        try self.sides.add(try newXyRect(alloc, p0.x, p1.x, p0.y, p1.y, p0.z, m));
+        try self.sides.add(try newXzRect(alloc, p0.x, p1.x, p0.z, p1.z, p1.y, m));
+        try self.sides.add(try newXzRect(alloc, p0.x, p1.x, p0.z, p1.z, p0.y, m));
+        try self.sides.add(try newYzRect(alloc, p0.y, p1.y, p0.z, p1.z, p1.x, m));
+        try self.sides.add(try newYzRect(alloc, p0.y, p1.y, p0.z, p1.z, p0.x, m));
         return self;
     }
 
@@ -556,7 +559,7 @@ pub const ConstantMedium = struct {
 
         const ray_length = r.direction.length();
         const distance_inside_boundary = (rec2.t - rec1.t) * ray_length;
-        const hit_distance = self.neg_inv_density * @log(random.randomDouble());
+        const hit_distance = self.neg_inv_density * @log(rng.randomDouble());
 
         if (hit_distance > distance_inside_boundary) return false;
 
@@ -582,14 +585,19 @@ pub const BvhNode = struct {
     right: *Object,
     box: Aabb,
 
-    pub fn init(alloc: Allocator, src_objects: []const *Object, start: usize, end: usize, time0: f64, time1: f64) *BvhNode {
-        const node = alloc.create(BvhNode);
+    pub const BuildError = Allocator.Error || error{ InvalidObjectRange, MissingBoundingBox };
+
+    pub fn init(alloc: Allocator, src_objects: []const *Object, start: usize, end: usize, time0: f64, time1: f64) BuildError!*BvhNode {
+        if (start >= end or end > src_objects.len) return error.InvalidObjectRange;
+        const node = try alloc.create(BvhNode);
+        errdefer alloc.destroy(node);
 
         // Do not mutate the caller's object list: work on a copy.
-        const objects = alloc.alloc(*Object, src_objects.len);
+        const objects = try alloc.alloc(*Object, src_objects.len);
+        defer alloc.free(objects);
         @memcpy(objects, src_objects);
 
-        const axis: u8 = @intCast(random.randomInt(0, 2));
+        const axis: u8 = @intCast(rng.randomInt(0, 2));
         const object_span = end - start;
 
         if (object_span == 1) {
@@ -606,14 +614,14 @@ pub const BvhNode = struct {
         } else {
             sortObjects(objects, start, end, axis);
             const mid = start + object_span / 2;
-            node.left = wrapBvh(alloc, init(alloc, objects, start, mid, time0, time1));
-            node.right = wrapBvh(alloc, init(alloc, objects, mid, end, time0, time1));
+            node.left = try wrapBvh(alloc, try init(alloc, objects, start, mid, time0, time1));
+            node.right = try wrapBvh(alloc, try init(alloc, objects, mid, end, time0, time1));
         }
 
         var box_left: Aabb = undefined;
         var box_right: Aabb = undefined;
         if (!node.left.boundingBox(time0, time1, &box_left) or !node.right.boundingBox(time0, time1, &box_right)) {
-            std.debug.print("No bounding box in bvh_node constructor.\n", .{});
+            return error.MissingBoundingBox;
         }
         node.box = math.surroundingBox(box_left, box_right);
         return node;
@@ -638,7 +646,7 @@ fn boxCompare(a: *Object, b: *Object, axis: u8) bool {
     var box_a: Aabb = undefined;
     var box_b: Aabb = undefined;
     if (!a.boundingBox(0, 0, &box_a) or !b.boundingBox(0, 0, &box_b)) {
-        std.debug.print("No bounding box in bvh_node constructor.\n", .{});
+        return false;
     }
     return box_a.min.at(axis) < box_b.min.at(axis);
 }
