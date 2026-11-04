@@ -9,8 +9,12 @@ const Point3 = math.Point3;
 const Vec3 = math.Vec3;
 const Color = math.Color;
 
+// @brief 场景选择仅包含原随机场景与受控材质对比摄影棚。
+pub const SceneKind = enum { random, materials };
+
 // @brief 命令行参数；不改变用户原先设置的 8640 默认宽度，预览时应显式降低分辨率。
 pub const Options = struct {
+    scene: SceneKind = .random,
     thread_count: usize = 0,
     help: bool = false,
     image_width: i32 = 8640,
@@ -34,10 +38,15 @@ pub const Options = struct {
     // @param args 不包含可执行文件路径的参数切片。
     pub fn parse(args: []const [:0]const u8) !Options {
         var options = Options{};
+        var explicit_focus = false;
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
                 options.help = true;
+            } else if (std.mem.eql(u8, args[i], "--scene")) {
+                i += 1;
+                if (i == args.len) return error.MissingOptionValue;
+                options.scene = std.meta.stringToEnum(SceneKind, args[i]) orelse return error.InvalidScene;
             } else if (std.mem.eql(u8, args[i], "--threads")) {
                 i += 1;
                 if (i == args.len) return error.MissingThreadCount;
@@ -63,6 +72,7 @@ pub const Options = struct {
                         options.f_number = value;
                     } else if (std.mem.eql(u8, flag, "--focus-distance")) {
                         options.focus_distance = value;
+                        explicit_focus = true;
                     } else if (std.mem.eql(u8, flag, "--shutter")) {
                         if (value > 1) return error.ShutterOutsideSceneInterval;
                         options.shutter_seconds = value;
@@ -107,11 +117,34 @@ pub const Options = struct {
                 return error.UnknownArgument;
             }
         }
+        // @notice 预设在所有参数解析后生效；显式对焦距离无论出现在 --scene 前后都不被覆盖。
+        if (options.scene == .materials and !explicit_focus) options.focus_distance = Point3.init(0, 0.6, 7.5).length();
         return options;
+    }
+
+    // @brief 材质场景默认 50mm 配合约 7.5m 机位，成像宽约 5.4m；其他摄影参数仍由用户控制。
+    pub fn cameraArgs(self: Options) camera.PhysicalCameraArgs {
+        return .{
+            .lookfrom = if (self.scene == .materials) Point3.init(0, 1.6, 7.5) else Point3.init(13, 2, 3),
+            .lookat = if (self.scene == .materials) Point3.init(0, 1, 0) else Point3.init(0, 0.65, 0),
+            .vup = Vec3.init(0, 1, 0),
+            .focal_length_mm = self.focal_length_mm,
+            .f_number = self.f_number,
+            .focus_distance = self.focus_distance,
+            .shutter_close = self.shutter_seconds,
+            .iso = self.iso,
+            .exposure_compensation = self.exposure_compensation,
+        };
+    }
+
+    // @brief 摄影棚使用暗中性环境，随机场景保留原蓝色环境。
+    pub fn background(self: Options) Color {
+        return if (self.scene == .materials) Color.init(0.008, 0.008, 0.008) else Color.init(0.3, 0.4, 0.6);
     }
 };
 
 const usage = "Usage: zrenderer [options]\n" ++
+    "  --scene random|materials  Scene preset (default random)\n" ++
     "  --threads 0  Auto-select CPU workers (default)\n" ++
     "  --threads 1  Render on a single thread\n" ++
     "  --width N    Image width, 16:9 aspect ratio (default 8640)\n" ++
@@ -125,7 +158,7 @@ const usage = "Usage: zrenderer [options]\n" ++
     "  --output FILE   PNG path; parent directory must exist\n" ++
     "  --focal-length MM  Physical focal length (default 50)\n" ++
     "  --f-number N       Lens f-number (default 8)\n" ++
-    "  --focus-distance M Focus plane distance (default 13.3)\n" ++
+    "  --focus-distance M Focus plane distance (random 13.3, materials 7.524)\n" ++
     "  --shutter SECONDS  Exposure duration, (0,1] (default 0.008)\n" ++
     "  --iso N            Relative sensor gain (default 100)\n" ++
     "  --exposure EV      Exposure compensation (default 0)\n" ++
@@ -151,28 +184,21 @@ pub fn main(init: std.process.Init) !void {
     timer.start();
 
     // @notice 参数解析已将快门限制在当前场景 BVH 的 [0,1] 秒运动区间内。
-    const args = camera.PhysicalCameraArgs{
-        .lookfrom = Point3.init(13, 2, 3),
-        .lookat = Point3.init(0, 0.65, 0),
-        .vup = Vec3.init(0, 1, 0),
-        .focal_length_mm = options.focal_length_mm,
-        .f_number = options.f_number,
-        .focus_distance = options.focus_distance,
-        .shutter_close = options.shutter_seconds,
-        .iso = options.iso,
-        .exposure_compensation = options.exposure_compensation,
-    };
+    const args = options.cameraArgs();
     const cam = try args.build();
-    std.debug.print("Loading PBR scene...\n", .{});
-    const scene = try scene_mod.loadRandomScene(alloc, .{ .fur_strands = options.fur_strands });
-    std.debug.print("Scene loaded: {d} objects; {d} hero fur strands.\n", .{ scene.world.list.items.len, options.fur_strands });
+    std.debug.print("Loading {s} scene...\n", .{@tagName(options.scene)});
+    const scene = switch (options.scene) {
+        .random => try scene_mod.loadRandomScene(alloc, .{ .fur_strands = options.fur_strands }),
+        .materials => try scene_mod.loadMaterialScene(alloc),
+    };
+    std.debug.print("Scene loaded: {d} objects; {d} hero fur strands.\n", .{ scene.world.list.items.len, if (options.scene == .random) options.fur_strands else @as(usize, 0) });
 
     const image_width = options.image_width;
     const image_height: i32 = @intFromFloat(@as(f64, @floatFromInt(image_width)) / args.aspectRatio());
 
     const params = render.RenderParams{
         .cam = cam,
-        .background = Color.init(0.3, 0.4, 0.6),
+        .background = options.background(),
         .sample_environment = true,
         .image_width = image_width,
         .image_height = image_height,

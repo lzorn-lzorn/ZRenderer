@@ -3,6 +3,7 @@ const math = @import("math.zig");
 const random = @import("random.zig");
 const object = @import("object.zig");
 const light = @import("light.zig");
+const medium_mod = @import("medium.zig");
 
 const Color = math.Color;
 const Ray = math.Ray;
@@ -67,44 +68,83 @@ fn directLighting(incoming: Ray, rec: *const HitRecord, world: *object.BvhNode, 
 // @method 相机直接可见发光和 delta 链后的发光权重为一；直接光照在轮盘之前累积。
 // @method 透射样本含 $\eta^2$；轮盘使用 $\beta/\prod\eta^2$，避免误杀进入玻璃的路径。
 // @method 存活概率 $q=\min(rr,\max(0.05,\max_c\beta_c\,\eta_{scale}))$，仅存活路径除以 $q$。
-// @notice 不实现体散射、嵌套介质栈或焦散专用算法；阴影射线保持当前快门时间。
+// @method **内部随机游走**：$D\sim\mathrm{Exp}(\sigma_s)$，只乘 $\exp(-\sigma_a\min(D,L))$；散射概率已包含在自由程分布中。
+// @method 若 $D<L$，在实际内部位置按 HG 相函数采样，$p_{HG}/q_{HG}=1$；不附加表面余弦或重复乘散射消光。
+// @notice 支持分离闭合抛光物体的均匀体散射及相机初始位于其内部；不支持重叠/嵌套介质或介质内嵌物体。
+// @notice 体积顶点不做穿折射界面的 NEE；必须随机游走至边界离开，因此不对体积方向应用未配对的光源 MIS。
 pub fn rayColorLit(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth: i32, rr: f64) Color {
     std.debug.assert(rr > 0 and rr < 1);
     var ray = r;
     var radiance: Color = .{};
     var throughput = Color.init(1, 1, 1);
-    var remaining = @max(depth, 0);
-    var previous_delta = true;
+    var remaining: i32 = @max(depth, 0);
+    var previous_uses_mis = false;
     var previous_pdf: f64 = 0;
     var previous_origin = r.origin;
     var eta_scale: f64 = 1;
+    var active_medium: ?*const medium_mod.Homogeneous = null;
+    var first_segment = true;
 
     while (true) {
         var rec: HitRecord = .{};
         const found = world.hit(ray, 0, math.infinity, &rec);
+        // @notice 闭合且无嵌入几何时，第一交点背面意味着相机初始处于该介质内部。
+        if (first_segment and found and !rec.front_face) active_medium = rec.material.?.interiorMedium();
+        first_segment = false;
+        if (active_medium) |medium| {
+            // @notice 有界介质内必须存在出口；无出口属于无效/不受支持的几何，不能直接泄露环境光。
+            if (!found) return radiance;
+            const direction_length = ray.direction.length();
+            if (!std.math.isFinite(direction_length) or direction_length <= 0) return radiance;
+            const surface_distance = rec.t * direction_length;
+            const distance = if (medium.sigma_s == 0) math.infinity else medium.sampleDistance(random.randomDouble());
+            throughput = throughput.mul(medium.absorption(@min(distance, surface_distance)));
+            if (distance < surface_distance) {
+                const position = ray.at(distance / direction_length);
+                const direction = medium.sampleDirection(ray.direction, random.randomDouble(), random.randomDouble());
+                // @notice 无表面就没有法线偏移；此连续相函数没有配对 NEE，使用权重一而非套用表面 MIS。
+                previous_uses_mis = false;
+                previous_pdf = 0;
+                previous_origin = position;
+                ray = Ray.init(position, direction, ray.time);
+                if (!continuePath(&throughput, &remaining, eta_scale, rr)) return radiance;
+                continue;
+            }
+        }
         const emitted = if (found) rec.material.?.emitted5(ray, &rec, rec.u, rec.v, rec.p) else lights.background;
-        const emission_weight = if (previous_delta) 1 else light.powerHeuristic(previous_pdf, lights.pdf(previous_origin, ray.direction, ray.time));
+        const emission_weight = if (!previous_uses_mis) 1 else light.powerHeuristic(previous_pdf, lights.pdf(previous_origin, ray.direction, ray.time));
         radiance = radiance.add(throughput.mul(emitted).scale(emission_weight));
         if (!found) return radiance;
         const mat = rec.material.?;
         if (mat.hasNonDelta()) radiance = radiance.add(throughput.mul(directLighting(ray, &rec, world, lights)));
         const scatter = mat.bsdfSample(ray, &rec) orelse return radiance;
         throughput = throughput.mul(scatter.weight);
-        if (!light.validRadiance(throughput)) return radiance;
-        const contribution = @max(throughput.x, @max(throughput.y, throughput.z));
-        if (contribution <= 0) return radiance;
-        previous_delta = scatter.is_delta;
+        // @notice 通过几何半球判断跨界，不能用 eta!=1：折射率匹配时仍须进入或离开吸收介质。
+        if (mat.interiorMedium()) |medium| {
+            if (scatter.direction.dot(rec.normal) < 0) active_medium = if (rec.front_face) medium else null;
+        }
+        previous_uses_mis = !scatter.is_delta;
         previous_pdf = scatter.pdf;
         previous_origin = rec.p;
         ray = spawnRay(rec.p, rec.normal, scatter.direction, ray.time);
         eta_scale /= scatter.eta * scatter.eta;
-        if (remaining > 0) remaining -= 1;
-        if (remaining == 0) {
-            const survival = @min(rr, @max(0.05, contribution * eta_scale));
-            if (random.randomDouble() >= survival) return radiance;
-            throughput = throughput.scale(1 / survival);
-        }
+        if (!continuePath(&throughput, &remaining, eta_scale, rr)) return radiance;
     }
+}
+
+// @brief 表面与体积事件共享通量检查和俄罗斯轮盘；无硬性最大反弹数。
+// @method $q=\min(rr,\max(0.05,\max_c\beta_c\eta_{scale}))$；存活后 $\beta\leftarrow\beta/q$。
+fn continuePath(throughput: *Color, remaining: *i32, eta_scale: f64, rr: f64) bool {
+    if (!light.validRadiance(throughput.*)) return false;
+    const contribution = @max(throughput.x, @max(throughput.y, throughput.z));
+    if (contribution <= 0) return false;
+    if (remaining.* > 0) remaining.* -= 1;
+    if (remaining.* == 0) {
+        const survival = @min(rr, @max(0.05, contribution * eta_scale));
+        if (random.randomDouble() >= survival) return false;
+        throughput.* = throughput.scale(1 / survival);
+    }
+    return true;
 }
 
 // @brief 保留原主入口，将旧形状光源和背景适配到统一 NEE/MIS 积分器。

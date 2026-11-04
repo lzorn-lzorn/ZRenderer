@@ -10,6 +10,9 @@ const Aabb = math.Aabb;
 const Onb = math.Onb;
 const Allocator = std.mem.Allocator;
 
+// @brief 真实径向位移水球；保持 Object 入口并独立实现隐式曲面求交。
+pub const WavySphere = @import("water.zig").WavySphere;
+
 // @brief 保存射线命中的参数、位置、纹理坐标、朝向法线及借用材质。
 pub const HitRecord = struct {
     front_face: bool = false,
@@ -31,6 +34,7 @@ pub const HitRecord = struct {
 // @brief 对几何体、变换、介质和加速结构统一分派；各分支指针均为借用引用。
 pub const Object = union(enum) {
     sphere: *Sphere,
+    wavy_sphere: *WavySphere,
     capsule: *Capsule,
     xy_rect: *XyRect,
     xz_rect: *XzRect,
@@ -52,6 +56,7 @@ pub const Object = union(enum) {
     pub fn hit(self: Object, r: Ray, t_min: f64, t_max: f64, rec: *HitRecord) bool {
         return switch (self) {
             .sphere => |s| s.hit(r, t_min, t_max, rec),
+            .wavy_sphere => |s| s.hit(r, t_min, t_max, rec),
             .capsule => |s| s.hit(r, t_min, t_max, rec),
             .xy_rect => |s| s.hit(r, t_min, t_max, rec),
             .xz_rect => |s| s.hit(r, t_min, t_max, rec),
@@ -72,6 +77,7 @@ pub const Object = union(enum) {
     pub fn boundingBox(self: Object, t0: f64, t1: f64, out: *Aabb) bool {
         return switch (self) {
             .sphere => |s| s.boundingBox(t0, t1, out),
+            .wavy_sphere => |s| s.boundingBox(t0, t1, out),
             .capsule => |s| s.boundingBox(t0, t1, out),
             .xy_rect => |s| s.boundingBox(t0, t1, out),
             .xz_rect => |s| s.boundingBox(t0, t1, out),
@@ -95,10 +101,11 @@ pub const Object = union(enum) {
     // @param o 世界空间观察点；v 为非零、可非单位的世界方向。
     // @param time 与后续求交射线使用相同的时间。
     // @return 不支持的分支或无效方向返回零。
-    // @notice 支持球、三种矩形、组、翻面、平移及 y 旋转；胶囊、盒、介质和 BVH 不支持光源采样。
+    // @notice 支持球、三种矩形、组、翻面、平移及 y 旋转；水球、胶囊、盒、介质和 BVH 不支持光源采样。
     pub fn pdfValueAt(self: Object, o: Point3, v: Vec3, time: f64) f64 {
         return switch (self) {
             .sphere => |s| s.pdfValueAt(o, v, time),
+            .wavy_sphere => 0.0,
             .xy_rect => |s| rectanglePdf(self, o, v, time, (s.x1 - s.x0) * (s.y1 - s.y0)),
             .xz_rect => |s| rectanglePdf(self, o, v, time, (s.x1 - s.x0) * (s.z1 - s.z0)),
             .yz_rect => |s| rectanglePdf(self, o, v, time, (s.y1 - s.y0) * (s.z1 - s.z0)),
@@ -117,11 +124,12 @@ pub const Object = union(enum) {
 
     // @brief 从世界空间原点 o 抽取指定路径时间的光源方向。
     // @param time 与 pdfValueAt 及后续求交保持一致。
-    // @return 方向不保证单位长度；不支持的分支返回占位方向 (1,0,0)。
+    // @return 方向不保证单位长度；水球返回零向量，其余不支持的分支保留占位方向 (1,0,0)。
     // @notice 对象组中的每个成员都必须支持采样；翻面不改变几何分布和 PDF。
     pub fn randomAt(self: Object, o: Point3, time: f64) Vec3 {
         return switch (self) {
             .sphere => |s| s.randomAt(o, time),
+            .wavy_sphere => Vec3.init(0, 0, 0),
             .xy_rect => |s| Point3.init(rng.randomDoubleRange(s.x0, s.x1), rng.randomDoubleRange(s.y0, s.y1), s.k).sub(o),
             .xz_rect => |s| s.random(o),
             .yz_rect => |s| Point3.init(s.k, rng.randomDoubleRange(s.y0, s.y1), rng.randomDoubleRange(s.z0, s.z1)).sub(o),
@@ -148,6 +156,22 @@ pub fn newSphere(alloc: Allocator, cen0: Point3, cen1: Point3, t0: f64, t1: f64,
     const o = try alloc.create(Object);
     o.* = .{ .sphere = s };
     return o;
+}
+
+// @brief 分配静态真实位移水球及对象包装；不创建或修改材质。
+// @param alloc 场景分配器；center 为有限世界球心，radius 为有限正半径。
+// @param amplitude 半径比例，范围 [0,0.1]，建议 0.035。
+// @param frequency 无量纲角频率，范围 [0,40]，建议 14；mat 为借用材质。
+// @return 新对象或 InvalidWavySphere/OutOfMemory；两次分配均保证失败清理。
+// @notice 可直接使用普通 dielectric(1.333)；水球不支持光源方向采样。
+pub fn newWavySphere(alloc: Allocator, center: Point3, radius: f64, amplitude: f64, frequency: f64, mat: *material.Material) !*Object {
+    const value = try WavySphere.init(center, radius, amplitude, frequency, mat);
+    const sphere = try alloc.create(WavySphere);
+    errdefer alloc.destroy(sphere);
+    sphere.* = value;
+    const obj = try alloc.create(Object);
+    obj.* = .{ .wavy_sphere = sphere };
+    return obj;
 }
 
 // @brief 分配有限圆柱和两个半球端帽组成的静态胶囊，用作真实毛束段几何。

@@ -8,6 +8,7 @@
 - `Material.bsdfPdf(self, r_in: Ray, rec: *const HitRecord, wi: Vec3) f64`
 - `Material.bsdfSample(self, r_in: Ray, rec: *const HitRecord) ?bsdf.Sample`
 - `Material.hasNonDelta(self) bool`
+- `Material.interiorMedium(self) ?*const medium.Homogeneous`：查询合法 `Subsurface` 的借用内部介质；自由程由主积分器处理。
 
 [独立数学核](../src/bsdf.zig) 仅依赖标准库、现有向量与随机数模块；不依赖几何或纹理。
 `Sample` 字段为 `direction: math.Vec3`、`weight: math.Color`、`pdf: f64`、
@@ -42,12 +43,17 @@ delta 样本的 `pdf` 是**所选离散分支概率质量**，不是可与光源
 - `newPbr(alloc, params: Pbr) CreateError!*Material`
 - `Pbr { base_color: Color, metallic: f64, roughness: f64, ior: f64 = 1.5 }`
 - `newTranslucent(alloc, color: Color, transmission: f64) CreateError!*Material`
+- `newSubsurface(alloc, params: Subsurface) CreateError!*Material`
+- `Subsurface { ior: f64 = 1.54, medium: medium.Homogeneous = .{} }`
 - 原有 `newLambertian`、`newMetal`、`newDielectric`、`newIsotropic` 保留；返回错误集合现在包含 `InvalidParameter`。
 
-颜色必须为线性 RGB，每分量在 $[0,1]$；金属度、粗糙度、fuzz、透射比例也在 $[0,1]$。
+反照率/F0 颜色必须为线性 RGB，每分量在 $[0,1]$；金属度、粗糙度、fuzz、透射比例也在 $[0,1]$。
 所有数值必须有限，NaN、无穷、负值和越界值明确返回 `error.InvalidParameter`，不静默钳位。
 IOR 的数值支持域为 $[10^{-6},10^6]$，覆盖常见介质并限制极端折射计算。
 水可直接使用物理值 `newDielectric(alloc, 1.333)`，无需艺术性缩放。
+该 IOR 只决定界面光学，不决定参考图的波形、布光、背景或曝光。
+`Subsurface` 的 `sigma_a` 为有限非负 RGB 吸收、`sigma_s` 为有限非负标量散射率，单位均为逆米，
+不是 $[0,1]$ 表面颜色；`g` 有限且 $|g|<0.99$。示例玉石 IOR=1.54 与介质系数均为美术选择，非实测参数。
 常量/棋盘反照率及程序纹理频率在构造时校验；程序纹理和后续修改后的纹理颜色还在新接口求值时校验。
 无效纹理颜色返回黑色/零密度/空样本，不能把 HDR 发光纹理当作反照率使用。
 
@@ -62,7 +68,7 @@ IOR 的数值支持域为 $[10^{-6},10^6]$，覆盖常见介质并限制极端�
 推荐沿用场景 arena。普通 allocator 下，需要分别释放包装和对应联合体指针；
 `newIsotropic` 额外拥有其工厂创建的常量纹理及颜色对象。
 
-## Lambertian 与薄层玉石外观
+## Lambertian 与薄片漫透射（非玉石模型）
 
 Lambertian 为 $f=\rho/\pi$，采用余弦半球采样 $p=\cos\theta/\pi$，故每个样本权重恰为 $\rho$。
 
@@ -79,6 +85,7 @@ $(1-t)|\cos\theta|/\pi$ 和 $t|\cos\theta|/\pi$。
 双半球积分为 $\rho\le1$；交换两条方向并把法线朝向新的入射侧后，函数不变。
 这是局部、互易、能量有界的漫 BTDF：**不是 BSSRDF，不模拟内部路径、厚度或空间扩散**。
 该薄层模型不折射，`eta=1`。
+`newTranslucent` 保留给薄片；当前示例玉石使用下面的抛光界面与体积随机游走，不使用此模型。
 
 ## GGX、Smith 与 VNDF
 
@@ -298,22 +305,37 @@ $F/F=1$ 和 $(1-F)\eta^2/(1-F)=\eta^2$。
 反转同一非全反射路径并翻转法线，两次 Fresnel 分支概率相同、方向相互还原，
 eta 和辐亮度权重的乘积分别为 1；不能把带不同介质测度的 delta 写成普通连续 BSDF 的数值互易比较。
 
+## 抛光边界与真实随机游走 SSS
+
+`Subsurface` 通过同一个 `sampleDielectric` 处理界面，其 `bsdfEval/pdf` 为零、`hasNonDelta=false`，
+只表示**表面是 delta**，不表示内部没有散射。`Material.interiorMedium()` 将内部介质交给
+[主积分器](../src/color.zig)，当前已经接入场景和主程序，不是等待集成的独立模块。
+
+内部在不同空间位置按 $D\sim\mathrm{Exp}(\sigma_s)$ 及 HG 相函数随机游走，
+逐段乘 $e^{-\sigma_a d}$，有真实的吸收、厚度依赖和空间扩散；它不是薄层 BTDF，
+也没有另行使用解析 BSSRDF 或扩散近似。方向密度是球面相函数，不能乘表面余弦。
+边界折射进入/离开时切换活动介质；反射/全反射不切换，IOR=1 也仍需切换介质。
+
+`sigma_s=0` 时仅有 Beer 吸收；`sigma_a=(0,0,0)` 且 `sigma_s=0` 时为清澈电介质，
+保留 IOR 对应的反射/折射，不会退化成漫反射或不透明体。
+只支持外部空气中的分离闭合物体，不支持嵌套、相交或内部嵌入其他物体。
+没有体积 NEE、跨折射界面连接和专用焦散求解；参数、光学厚度与权重证明见 [次表面散射](subsurface.md)。
+
 ## 兼容性、相函数与验证
 
 旧 `scatter`、`scatterPdf`、`scatterSrec`、`scatteringPdf` 和发光接口仍可调用。
 旧介电接口也使用新的精确 Fresnel 与 eta²；旧金属散射入口保留历史镜面/随机 fuzz 行为，**不是 GGX**。
-PBR 和薄层新模型只在新 BSDF 接口工作，旧散射接口返回 `false`。
+PBR、薄层和 `Subsurface` 只在新 BSDF 接口工作，旧散射接口返回 `false`；体积状态还需 `rayColorLit`。
 `DiffuseLight` 不散射。`Isotropic` 是不带表面余弦的体相函数，不能冒充表面 BSDF：
 新接口明确返回黑色、零密度、`null`，`hasNonDelta=false`；其旧体散射方法保留。
-需要体渲染时，应另建不乘表面余弦的 phase-function 积分契约。
+新体积路径已通过 `medium.Homogeneous` 的 HG 契约直接接入积分器，不借用旧 `Isotropic` 表面接口。
 
 [测试集](../src/bsdf_tests.zig) 覆盖世界空间 sample/eval/pdf 一致性、掠射有限值、反射白炉、
 互易性、VNDF 经验分箱与包含 null 的归一化、漫反射/漫透射端点和概率抵消、
 镜面常量权重、精确 Fresnel、水的进入/离开 eta²、Snell 与全反射、非法参数和逐次分配失败。
 另有独立解析的 GGX 双瓣 f/pdf、多个粗糙度的法向接受率、逐通道镜面/漫反射预算求积、
 跨界面往返折射、极高 IOR 的小角度回归、直接构造闭包与后续参数修改的非法输入检查。
-现有 **18 项独立测试在 Zig 0.17.1 的 Debug 与 ReleaseSafe 均通过**；测试文件本身不导入根测试。
+测试文件可独立编译，也已由 [主测试根](../src/tests.zig) 导入；当前通过状态以本轮实际测试输出为准。
 统计测试固定随机种子；白炉采样与数值求积留有统计/离散化容差，数学能量保证来自上面的证明。
 粗糙度下限的尖峰由解析检查和 VNDF 采样覆盖，不依赖均匀角度网格解析该尖峰。
 可独立执行 `zig test src/bsdf_tests.zig src/stb_impl.c -lc -I src`，并加 `-O ReleaseSafe` 或 `-O ReleaseFast`。
-此任务不修改根测试导入或构建配置，集成方需要把测试模块加入自己的测试根。

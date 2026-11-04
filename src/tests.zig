@@ -17,6 +17,9 @@ test {
     _ = @import("geometry_tests.zig");
     _ = @import("lighting_tests.zig");
     _ = @import("scene_tests.zig");
+    _ = @import("medium_tests.zig");
+    _ = @import("water_tests.zig");
+    _ = @import("subsurface_tests.zig");
 }
 
 // @notice Zig 按需分析声明；除入口外，还检查未被使用的公共接口。

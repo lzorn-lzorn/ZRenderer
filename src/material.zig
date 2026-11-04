@@ -5,6 +5,7 @@ const texture = @import("texture.zig");
 const pdf_mod = @import("pdf.zig");
 const object = @import("object.zig");
 const bsdf = @import("bsdf.zig");
+const medium_mod = @import("medium.zig");
 
 const Color = math.Color;
 const Vec3 = math.Vec3;
@@ -33,6 +34,7 @@ pub const Material = union(enum) {
     diffuse_light: *DiffuseLight,
     pbr: *Pbr,
     translucent: *Translucent,
+    subsurface: *Subsurface,
 
     // @brief 旧版四参数散射；新材质仅通过新 BSDF 接口散射。
     pub fn scatter(self: Material, r_in: Ray, rec: *const HitRecord, attenuation: *Color, scattered: *Ray) bool {
@@ -42,7 +44,7 @@ pub const Material = union(enum) {
             .dielectric => |m| m.scatter(r_in, rec, attenuation, scattered),
             .isotropic => |m| m.scatter(r_in, rec, attenuation, scattered),
             .diffuse_light => |m| m.scatter(r_in, rec, attenuation, scattered),
-            .pbr, .translucent => false,
+            .pbr, .translucent, .subsurface => false,
         };
     }
 
@@ -78,6 +80,15 @@ pub const Material = union(enum) {
             .lambertian, .pbr, .translucent => true,
             .metal => |m| m.fuzz > 0,
             else => false,
+        };
+    }
+
+    // @brief 查询闭合抛光界面的内部介质；返回借用参数，不进行自由程抽样。
+    // @notice 外部为空气，仅支持彼此分离、不嵌套的闭合物体；体散射由主积分器处理。
+    pub fn interiorMedium(self: Material) ?*const medium_mod.Homogeneous {
+        return switch (self) {
+            .subsurface => |m| if (m.valid()) &m.medium else null,
+            else => null,
         };
     }
 
@@ -138,6 +149,7 @@ pub const Material = union(enum) {
                 };
             },
             .dielectric => |m| return bsdf.sampleDielectric(r_in.direction.neg(), rec.normal, m.ir, rec.front_face),
+            .subsurface => |m| return if (m.valid()) bsdf.sampleDielectric(r_in.direction.neg(), rec.normal, m.ior, rec.front_face) else null,
             else => {},
         }
         const closure = self.surface(rec) orelse return null;
@@ -248,7 +260,31 @@ pub fn newPbr(alloc: Allocator, params: Pbr) CreateError!*Material {
     return mat;
 }
 
-// @brief 玉石外观的薄层漫反射/漫透射混合，不是体散射或完整 BSSRDF。
+// @brief 抛光电介质界面及内部均匀介质；玉石使用多次空间随机游走，而非薄层漫透射。
+// @notice 介质系数单位为逆米；不包含矿物纹理、粗糙折射或嵌套介质栈。
+pub const Subsurface = struct {
+    ior: f64 = 1.54,
+    medium: medium_mod.Homogeneous = .{},
+
+    // @brief 同时检查界面折射率与内部体积参数。
+    pub fn valid(self: Subsurface) bool {
+        return bsdf.validIor(self.ior) and self.medium.valid();
+    }
+};
+
+// @brief 分配闭合物体的体散射材质；零散射率时退化为带 Beer 吸收的透明电介质。
+// @return 调用方拥有 Subsurface 与 Material；部分分配失败自动清理，或由 arena 统一释放。
+pub fn newSubsurface(alloc: Allocator, params: Subsurface) CreateError!*Material {
+    if (!params.valid()) return error.InvalidParameter;
+    const m = try alloc.create(Subsurface);
+    errdefer alloc.destroy(m);
+    m.* = params;
+    const mat = try alloc.create(Material);
+    mat.* = .{ .subsurface = m };
+    return mat;
+}
+
+// @brief 薄层漫反射/漫透射混合，不是体散射或玉石模型；保留给薄片材料。
 pub const Translucent = struct {
     color: Color,
     transmission: f64,
