@@ -213,7 +213,9 @@ pub const Dielectric = struct {
     fn reflectance(cosine: f64, ref_idx: f64) f64 {
         const r0 = (1 - ref_idx) / (1 + ref_idx);
         const r0sq = r0 * r0;
-        return r0sq + (1 - r0sq) * math.pow(1.0 - cosine, 5.0);
+        const x = 1.0 - cosine;
+        const x2 = x * x;
+        return r0sq + (1 - r0sq) * x2 * x2 * x;
     }
 };
 

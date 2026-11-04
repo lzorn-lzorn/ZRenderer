@@ -5,6 +5,7 @@ const camera = @import("camera.zig");
 const object = @import("object.zig");
 const color_mod = @import("color.zig");
 const stb = @import("stb.zig");
+const sampling = @import("sampling.zig");
 
 const Color = math.Color;
 const Camera = camera.Camera;
@@ -52,6 +53,11 @@ pub const Clock = struct {
     }
 };
 
+pub const RenderStats = struct {
+    total_samples: u64 = 0,
+    early_stopped_pixels: u64 = 0,
+};
+
 pub const RenderParams = struct {
     cam: Camera,
     background: Color,
@@ -66,6 +72,13 @@ pub const RenderParams = struct {
     thread_count: usize = 0,
     rows_per_task: usize = 8,
     seed: u64 = random.default_seed,
+    sampler: sampling.Sampler = .sobol,
+    adaptive: bool = true,
+    min_samples: u32 = 16,
+    absolute_error: f64 = 0.002,
+    relative_error: f64 = 0.05,
+    /// Optional caller-owned result, written only after all workers join.
+    stats: ?*RenderStats = null,
 };
 
 /// Returns top-to-bottom RGB pixels. The caller owns the returned allocation.
@@ -82,12 +95,23 @@ pub fn renderPixels(
         !std.math.isFinite(params.rr) or params.rr <= 0 or params.rr >= 1)
         return error.InvalidRenderParams;
 
+    if (params.min_samples == 0 or !std.math.isFinite(params.absolute_error) or
+        !std.math.isFinite(params.relative_error) or params.absolute_error < 0 or params.relative_error < 0)
+        return error.InvalidRenderParams;
+
     const w: usize = @intCast(params.image_width);
     const h: usize = @intCast(params.image_height);
     const stride = try std.math.mul(usize, w, 3);
     if (stride > std.math.maxInt(c_int)) return error.InvalidRenderParams;
     const data = try alloc.alloc(u8, try std.math.mul(usize, stride, h));
     errdefer alloc.free(data);
+
+    // The unshifted Sobol coordinates depend only on sample number, not pixel.
+    // Bound cache memory at 80 KiB; extreme budgets compute later points on demand.
+    const point_count = @min((@as(usize, @intCast(params.samples_per_pixel)) - 1) / sampling.replicas + 1, 4096);
+    const points: []sampling.SobolPoint = if (params.sampler == .sobol) try alloc.alloc(sampling.SobolPoint, point_count) else &.{};
+    defer alloc.free(points);
+    for (points, 0..) |*point, index| point.* = sampling.sobolPoint(@intCast(index));
 
     const rows_per_task = @min(params.rows_per_task, h);
     const task_count = (h - 1) / rows_per_task + 1;
@@ -101,6 +125,7 @@ pub fn renderPixels(
         .width = w,
         .height = h,
         .rows_per_task = rows_per_task,
+        .sobol_points = points,
     };
 
     if (params.show_progress) std.debug.print("Rendering with {d} worker(s)...\n", .{worker_count});
@@ -122,7 +147,12 @@ pub fn renderPixels(
         work.run(true);
     }
 
-    if (params.show_progress) std.debug.print("\rRendering: 100% ({d}/{d} rows)\n", .{ h, h });
+    const stats = RenderStats{
+        .total_samples = work.total_samples.load(.monotonic),
+        .early_stopped_pixels = work.early_stopped_pixels.load(.monotonic),
+    };
+    if (params.stats) |out| out.* = stats;
+    if (params.show_progress) std.debug.print("\rRendering: 100% ({d}/{d} rows), {d:.1} samples/pixel\n", .{ h, h, @as(f64, @floatFromInt(stats.total_samples)) / @as(f64, @floatFromInt(w * h)) });
     return data;
 }
 
@@ -134,9 +164,12 @@ const RenderWork = struct {
     width: usize,
     height: usize,
     rows_per_task: usize,
+    sobol_points: []const sampling.SobolPoint,
     next_row: std.atomic.Value(usize) = .init(0),
     completed_rows: std.atomic.Value(usize) = .init(0),
     cancelled: std.atomic.Value(bool) = .init(false),
+    total_samples: std.atomic.Value(u64) = .init(0),
+    early_stopped_pixels: std.atomic.Value(u64) = .init(0),
 
     fn run(self: *RenderWork, report_progress: bool) void {
         var last_percent: usize = 0;
@@ -155,24 +188,34 @@ const RenderWork = struct {
         }
     }
 
-    fn renderRow(self: *const RenderWork, row: usize) void {
+    fn renderRow(self: *RenderWork, row: usize) void {
         const params = self.params;
-        // Scheduling and worker count must not change the sample sequence.
-        random.seed(params.seed +% @as(u64, @intCast(row)));
         // Camera v points upwards; PNG rows start at the top of the image.
         const j = self.height - 1 - row;
+        const max_samples: u32 = @intCast(params.samples_per_pixel);
+        var row_samples: u64 = 0;
+        var early_stopped: u64 = 0;
         for (0..self.width) |i| {
-            var pixel_color = Color.init(0, 0, 0);
-            var s: i32 = 0;
-            while (s < params.samples_per_pixel) : (s += 1) {
-                const u = (@as(f64, @floatFromInt(i)) + random.randomDouble()) / @as(f64, @floatFromInt(self.width - 1));
-                const v = (@as(f64, @floatFromInt(j)) + random.randomDouble()) / @as(f64, @floatFromInt(self.height - 1));
-                const r = params.cam.getRay(u, v);
-                pixel_color = pixel_color.add(color_mod.rayColor(r, params.background, self.world, self.lights, params.min_bounce, params.rr));
+            const sampler = sampling.PixelSampler.init(params.seed, @intCast(row * self.width + i), params.sampler);
+            var estimate: sampling.Estimate = .{};
+            while (estimate.count < max_samples) {
+                const sequence_index = estimate.count / sampling.replicas;
+                const point: sampling.SobolPoint = if (params.sampler == .random) @splat(0) else if (sequence_index < self.sobol_points.len) self.sobol_points[sequence_index] else sampling.sobolPoint(sequence_index);
+                const sample = sampler.startSampleWithPoint(estimate.count, point);
+                // Each sample stays within its pixel and within the film [0,1].
+                const u = (@as(f64, @floatFromInt(i)) + sample[0]) / @as(f64, @floatFromInt(self.width));
+                const v = (@as(f64, @floatFromInt(j)) + sample[1]) / @as(f64, @floatFromInt(self.height));
+                const r = params.cam.getRaySampled(u, v, sample[2], sample[3], sample[4]);
+                estimate.add(color_mod.rayColor(r, params.background, self.world, self.lights, params.min_bounce, params.rr));
+                if (params.adaptive and estimate.converged(params.min_samples, params.absolute_error, params.relative_error)) break;
             }
+            row_samples += estimate.count;
+            if (estimate.count < max_samples) early_stopped += 1;
             const idx = (row * self.width + i) * 3;
-            color_mod.writeColor(self.data[idx..][0..3], pixel_color, params.samples_per_pixel);
+            color_mod.writeColor(self.data[idx..][0..3], estimate.sum, @intCast(estimate.count));
         }
+        _ = self.total_samples.fetchAdd(row_samples, .monotonic);
+        _ = self.early_stopped_pixels.fetchAdd(early_stopped, .monotonic);
     }
 };
 
@@ -187,6 +230,7 @@ pub fn renderImage(
     defer alloc.free(data);
 
     // All workers have joined: encode exactly once, without intermediate files.
+    if (params.show_progress) std.debug.print("Encoding PNG...\n", .{});
     const ok = stb.stbi_write_png(out_filename, params.image_width, params.image_height, params.channel, data.ptr, 0);
     if (ok == 0) {
         std.debug.print("stbi_write_png failed\n", .{});

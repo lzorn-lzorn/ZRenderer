@@ -6,6 +6,7 @@ const material = @import("material.zig");
 const texture = @import("texture.zig");
 const object = @import("object.zig");
 const render = @import("render.zig");
+const sampling = @import("sampling.zig");
 
 const Point3 = math.Point3;
 const Vec3 = math.Vec3;
@@ -14,6 +15,15 @@ const Color = math.Color;
 pub const Options = struct {
     thread_count: usize = 0,
     help: bool = false,
+    image_width: i32 = 8640,
+    samples: i32 = 100,
+    min_samples: u32 = 16,
+    min_bounce: i32 = 5,
+    adaptive: bool = true,
+    sampler: sampling.Sampler = .sobol,
+    relative_error: f64 = 0.05,
+    absolute_error: f64 = 0.002,
+    output: [:0]const u8 = "random_scene.png",
 
     pub fn parse(args: []const [:0]const u8) !Options {
         var options = Options{};
@@ -25,6 +35,39 @@ pub const Options = struct {
                 i += 1;
                 if (i == args.len) return error.MissingThreadCount;
                 options.thread_count = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidThreadCount;
+            } else if (std.mem.eql(u8, args[i], "--no-adaptive")) {
+                options.adaptive = false;
+            } else if (std.mem.eql(u8, args[i], "--width") or std.mem.eql(u8, args[i], "--samples") or
+                std.mem.eql(u8, args[i], "--min-samples") or std.mem.eql(u8, args[i], "--rr-depth") or
+                std.mem.eql(u8, args[i], "--relative-error") or std.mem.eql(u8, args[i], "--absolute-error") or
+                std.mem.eql(u8, args[i], "--sampler") or std.mem.eql(u8, args[i], "--output"))
+            {
+                const flag = args[i];
+                i += 1;
+                if (i == args.len) return error.MissingOptionValue;
+                const value = args[i];
+                if (std.mem.eql(u8, flag, "--width")) {
+                    options.image_width = std.fmt.parseInt(i32, value, 10) catch return error.InvalidWidth;
+                    if (options.image_width < 4) return error.InvalidWidth;
+                } else if (std.mem.eql(u8, flag, "--samples")) {
+                    options.samples = std.fmt.parseInt(i32, value, 10) catch return error.InvalidSamples;
+                    if (options.samples <= 0) return error.InvalidSamples;
+                } else if (std.mem.eql(u8, flag, "--min-samples")) {
+                    options.min_samples = std.fmt.parseInt(u32, value, 10) catch return error.InvalidSamples;
+                    if (options.min_samples == 0) return error.InvalidSamples;
+                } else if (std.mem.eql(u8, flag, "--rr-depth")) {
+                    options.min_bounce = std.fmt.parseInt(i32, value, 10) catch return error.InvalidDepth;
+                    if (options.min_bounce < 0) return error.InvalidDepth;
+                } else if (std.mem.eql(u8, flag, "--sampler")) {
+                    options.sampler = std.meta.stringToEnum(sampling.Sampler, value) orelse return error.InvalidSampler;
+                } else if (std.mem.eql(u8, flag, "--output")) {
+                    if (value.len == 0) return error.InvalidOutput;
+                    options.output = value;
+                } else {
+                    const tolerance = std.fmt.parseFloat(f64, value) catch return error.InvalidTolerance;
+                    if (!std.math.isFinite(tolerance) or tolerance < 0) return error.InvalidTolerance;
+                    if (std.mem.eql(u8, flag, "--relative-error")) options.relative_error = tolerance else options.absolute_error = tolerance;
+                }
             } else {
                 return error.UnknownArgument;
             }
@@ -33,9 +76,18 @@ pub const Options = struct {
     }
 };
 
-const usage = "Usage: zrenderer [--threads N] [--help]\n" ++
+const usage = "Usage: zrenderer [options]\n" ++
     "  --threads 0  Auto-select CPU workers (default)\n" ++
-    "  --threads 1  Render on a single thread\n";
+    "  --threads 1  Render on a single thread\n" ++
+    "  --width N    Image width, 16:9 aspect ratio (default 8640)\n" ++
+    "  --samples N  Maximum samples per pixel (default 100)\n" ++
+    "  --min-samples N  Earliest adaptive check (default 16)\n" ++
+    "  --rr-depth N    Start roulette after N scatters (default 5)\n" ++
+    "  --sampler sobol|random  Camera sampler (default sobol)\n" ++
+    "  --no-adaptive  Always use exactly --samples samples\n" ++
+    "  --relative-error E  Relative error tolerance (default 0.05)\n" ++
+    "  --absolute-error E  Linear RGB absolute tolerance (default 0.002)\n" ++
+    "  --output FILE   PNG path; parent directory must exist\n";
 
 fn loadRandomScene(alloc: std.mem.Allocator) !*render.Scene {
     std.debug.print("Loading random scene...\n", .{});
@@ -113,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
     };
     const cam = args.build();
 
-    const image_width: i32 = 8640;
+    const image_width = options.image_width;
     const image_height: i32 = @intFromFloat(@as(f64, @floatFromInt(image_width)) / args.aspect_ratio);
 
     const params = render.RenderParams{
@@ -121,15 +173,20 @@ pub fn main(init: std.process.Init) !void {
         .background = Color.init(0.7, 0.8, 1.0),
         .image_width = image_width,
         .image_height = image_height,
-        .samples_per_pixel = 100,
-        .min_bounce = 100,
+        .samples_per_pixel = options.samples,
+        .min_bounce = options.min_bounce,
         .rr = 0.9,
         .channel = 3,
         .thread_count = options.thread_count,
+        .sampler = options.sampler,
+        .adaptive = options.adaptive,
+        .min_samples = options.min_samples,
+        .relative_error = options.relative_error,
+        .absolute_error = options.absolute_error,
     };
 
     std.debug.print("Render set done.\n", .{});
-    try render.renderImage(alloc, params, scene.bvh, scene.light, "random_scene.png");
+    try render.renderImage(alloc, params, scene.bvh, scene.light, options.output);
     std.debug.print("Rendering done.\n", .{});
 
     timer.stop();

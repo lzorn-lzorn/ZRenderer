@@ -8,6 +8,12 @@ const object = @import("object.zig");
 const render = @import("render.zig");
 const testing = std.testing;
 
+test {
+    _ = @import("bvh_tests.zig");
+    _ = @import("integrator_tests.zig");
+    _ = @import("sampling_tests.zig");
+}
+
 // Zig analyzes declarations lazily. Check unused public APIs as well as main.
 fn refAllDeclsRecursive(comptime T: type) void {
     testing.refAllDecls(T);
@@ -23,7 +29,7 @@ fn refAllDeclsRecursive(comptime T: type) void {
 }
 
 test "all handwritten public declarations compile" {
-    inline for (.{ math, random, camera, material, texture, object, render, @import("color.zig"), @import("noise.zig"), @import("pdf.zig"), @import("stb.zig"), @import("main.zig") }) |module| {
+    inline for (.{ math, random, camera, material, texture, object, render, @import("sampling.zig"), @import("color.zig"), @import("noise.zig"), @import("pdf.zig"), @import("stb.zig"), @import("main.zig") }) |module| {
         refAllDeclsRecursive(module);
     }
 }
@@ -256,7 +262,7 @@ test "parallel PNG covers every row with red above blue" {
         },
         .background = .{},
         .image_width = 5,
-        .image_height = 5,
+        .image_height = 6,
         .samples_per_pixel = 2,
         .min_bounce = 2,
         .rr = 0.9,
@@ -269,9 +275,9 @@ test "parallel PNG covers every row with red above blue" {
     defer image.deinit();
     try testing.expect(image.data != null);
     try testing.expectEqual(@as(i32, 5), image.width);
-    try testing.expectEqual(@as(i32, 5), image.height);
+    try testing.expectEqual(@as(i32, 6), image.height);
     // Inspect raw PNG rows, not ImageTexture.value(), which flips UV v.
-    for (0..5) |row| {
+    for (0..6) |row| {
         for (0..5) |column| {
             const offset = (row * 5 + column) * 3;
             const expected: [3]u8 = if (row < 3) .{ 255, 0, 0 } else .{ 0, 0, 255 };
@@ -356,4 +362,83 @@ test "thread command line options validate input" {
     try testing.expectError(error.InvalidThreadCount, Options.parse(&.{ "--threads", "-1" }));
     try testing.expectError(error.InvalidThreadCount, Options.parse(&.{ "--threads", "abc" }));
     try testing.expectError(error.UnknownArgument, Options.parse(&.{"--unknown"}));
+}
+
+test "adaptive rendering stops constant pixels early without changing normalization" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const mat = try material.newMetal(alloc, .{ .x = 1, .y = 1, .z = 1 }, 0);
+    var scene = render.Scene.init(alloc, "constant");
+    try scene.addObject(try object.newSphere(alloc, .{ .z = 100 }, .{ .z = 100 }, 0, 1, 1, mat));
+    try scene.buildBvh();
+    var params = parallelTestParams();
+    params.cam = .{ .lower_left_corner = .{ .x = -1, .y = -1, .z = -1 }, .horizontal = .{ .x = 2 }, .vertical = .{ .y = 2 } };
+    params.samples_per_pixel = 128;
+    params.background = .{ .x = 0.25, .y = 0.5, .z = 1 };
+    var stats: render.RenderStats = .{};
+    params.stats = &stats;
+    params.thread_count = 4;
+    const adaptive = try render.renderPixels(testing.allocator, params, scene.bvh, null);
+    defer testing.allocator.free(adaptive);
+    try testing.expectEqual(@as(u64, 17 * 19 * 32), stats.total_samples);
+    try testing.expectEqual(@as(u64, 17 * 19), stats.early_stopped_pixels);
+    params.adaptive = false;
+    const fixed = try render.renderPixels(testing.allocator, params, scene.bvh, null);
+    defer testing.allocator.free(fixed);
+    try testing.expectEqual(@as(u64, 17 * 19 * 128), stats.total_samples);
+    try testing.expectEqual(@as(u64, 0), stats.early_stopped_pixels);
+    try testing.expectEqualSlices(u8, fixed, adaptive);
+    params.adaptive = true;
+    params.min_samples = 256;
+    params.samples_per_pixel = 35; // Budget need not be a complete replica block.
+    const capped = try render.renderPixels(testing.allocator, params, scene.bvh, null);
+    defer testing.allocator.free(capped);
+    try testing.expectEqual(@as(u64, 17 * 19 * 35), stats.total_samples);
+    try testing.expectEqual(@as(u64, 0), stats.early_stopped_pixels);
+    try testing.expectEqualSlices(u8, fixed, capped);
+}
+
+test "adaptive samples and pixels are independent of thread scheduling" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scene = try parallelTestScene(arena.allocator());
+    var params = parallelTestParams();
+    params.samples_per_pixel = 96;
+    params.absolute_error = 0.1;
+    params.relative_error = 0.1;
+    var stats: render.RenderStats = .{};
+    params.stats = &stats;
+    for ([_]@import("sampling.zig").Sampler{ .sobol, .random }) |mode| {
+        params.sampler = mode;
+        params.thread_count = 1;
+        params.rows_per_task = 8;
+        const reference = try render.renderPixels(testing.allocator, params, scene.bvh, null);
+        defer testing.allocator.free(reference);
+        const reference_stats = stats;
+        params.thread_count = 4;
+        params.rows_per_task = 3;
+        const parallel = try render.renderPixels(testing.allocator, params, scene.bvh, null);
+        defer testing.allocator.free(parallel);
+        try testing.expectEqualSlices(u8, reference, parallel);
+        try testing.expectEqualDeep(reference_stats, stats);
+    }
+}
+
+test "sampling options reject invalid values and keep the configured large default" {
+    const Options = @import("main.zig").Options;
+    try testing.expectEqual(@as(i32, 8640), (try Options.parse(&.{})).image_width);
+    const options = try Options.parse(&.{ "--width", "320", "--samples", "64", "--sampler", "random", "--no-adaptive", "--rr-depth", "7", "--output", "test.png" });
+    try testing.expectEqual(@as(i32, 320), options.image_width);
+    try testing.expectEqual(@as(i32, 64), options.samples);
+    try testing.expectEqual(@as(i32, 7), options.min_bounce);
+    try testing.expect(!options.adaptive);
+    try testing.expectEqual(@import("sampling.zig").Sampler.random, options.sampler);
+    try testing.expectError(error.InvalidSampler, Options.parse(&.{ "--sampler", "invalid" }));
+    try testing.expectError(error.InvalidTolerance, Options.parse(&.{ "--relative-error", "nan" }));
+    try testing.expectError(error.InvalidTolerance, Options.parse(&.{ "--absolute-error", "-0.1" }));
+    try testing.expectError(error.InvalidSamples, Options.parse(&.{ "--min-samples", "0" }));
+    try testing.expectError(error.InvalidSamples, Options.parse(&.{ "--samples", "0" }));
+    try testing.expectError(error.InvalidWidth, Options.parse(&.{ "--width", "0" }));
+    try testing.expectError(error.MissingOptionValue, Options.parse(&.{"--width"}));
 }

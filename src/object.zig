@@ -581,86 +581,138 @@ pub const ConstantMedium = struct {
 // ---------------------------------------------------------------- BVH
 
 pub const BvhNode = struct {
+    // Equal pointers explicitly represent a leaf: intersect it exactly once.
     left: *Object,
     right: *Object,
     box: Aabb,
+    left_box: Aabb,
+    right_box: Aabb,
 
     pub const BuildError = Allocator.Error || error{ InvalidObjectRange, MissingBoundingBox };
 
     pub fn init(alloc: Allocator, src_objects: []const *Object, start: usize, end: usize, time0: f64, time1: f64) BuildError!*BvhNode {
         if (start >= end or end > src_objects.len) return error.InvalidObjectRange;
+        // Cache and validate every bound before sorting or allocating tree nodes.
+        // Only this temporary array is sorted; caller objects retain their order.
+        const entries = try alloc.alloc(BuildEntry, end - start);
+        defer alloc.free(entries);
+        for (src_objects[start..end], entries) |obj, *entry| {
+            var bounds: Aabb = undefined;
+            if (!obj.boundingBox(time0, time1, &bounds)) return error.MissingBoundingBox;
+            entry.* = .{ .object = obj, .box = bounds };
+        }
+        return build(alloc, entries);
+    }
+
+    const BuildEntry = struct {
+        object: *Object,
+        box: Aabb,
+
+        fn centroid(self: BuildEntry) Point3 {
+            return self.box.min.scale(0.5).add(self.box.max.scale(0.5));
+        }
+    };
+
+    fn build(alloc: Allocator, entries: []BuildEntry) Allocator.Error!*BvhNode {
         const node = try alloc.create(BvhNode);
         errdefer alloc.destroy(node);
 
-        // Do not mutate the caller's object list: work on a copy.
-        const objects = try alloc.alloc(*Object, src_objects.len);
-        defer alloc.free(objects);
-        @memcpy(objects, src_objects);
+        var centroid_bounds = Aabb.init(entries[0].centroid(), entries[0].centroid());
+        for (entries[1..]) |entry| {
+            centroid_bounds = math.surroundingBox(centroid_bounds, Aabb.init(entry.centroid(), entry.centroid()));
+        }
+        const extent = centroid_bounds.max.sub(centroid_bounds.min);
+        var axis: usize = 0;
+        if (extent.y > extent.x) axis = 1;
+        if (extent.z > extent.at(axis)) axis = 2;
+        // Stable, deterministic median split; equal extents prefer x, then y.
+        sortEntries(entries, axis);
 
-        const axis: u8 = @intCast(rng.randomInt(0, 2));
-        const object_span = end - start;
-
-        if (object_span == 1) {
-            node.left = objects[start];
-            node.right = objects[start];
-        } else if (object_span == 2) {
-            if (boxCompare(objects[start], objects[start + 1], axis)) {
-                node.left = objects[start];
-                node.right = objects[start + 1];
-            } else {
-                node.left = objects[start + 1];
-                node.right = objects[start];
-            }
+        if (entries.len <= 2) {
+            node.left = entries[0].object;
+            node.right = entries[entries.len - 1].object;
+            node.left_box = entries[0].box;
+            node.right_box = entries[entries.len - 1].box;
         } else {
-            sortObjects(objects, start, end, axis);
-            const mid = start + object_span / 2;
-            node.left = try wrapBvh(alloc, try init(alloc, objects, start, mid, time0, time1));
-            node.right = try wrapBvh(alloc, try init(alloc, objects, mid, end, time0, time1));
+            const mid = entries.len / 2;
+            const left = try build(alloc, entries[0..mid]);
+            errdefer destroyBuilt(alloc, left, mid);
+            node.left = try wrapBvh(alloc, left);
+            errdefer alloc.destroy(node.left);
+            const right = try build(alloc, entries[mid..]);
+            errdefer destroyBuilt(alloc, right, entries.len - mid);
+            node.right = try wrapBvh(alloc, right);
+            node.left_box = left.box;
+            node.right_box = right.box;
         }
-
-        var box_left: Aabb = undefined;
-        var box_right: Aabb = undefined;
-        if (!node.left.boundingBox(time0, time1, &box_left) or !node.right.boundingBox(time0, time1, &box_right)) {
-            return error.MissingBoundingBox;
-        }
-        node.box = math.surroundingBox(box_left, box_right);
+        node.box = math.surroundingBox(node.left_box, node.right_box);
         return node;
     }
 
-    pub fn hit(self: BvhNode, r: Ray, t_min: f64, t_max: f64, rec: *HitRecord) bool {
-        if (!self.box.hit(r, t_min, t_max)) return false;
-        const hit_left = self.left.hit(r, t_min, t_max, rec);
-        const hit_right = self.right.hit(r, t_min, if (hit_left) rec.t else t_max, rec);
-        return hit_left or hit_right;
+    // Failure cleanup only: count distinguishes owned subtrees from borrowed
+    // input Objects (which may themselves be BVHs). Success still uses the arena.
+    fn destroyBuilt(alloc: Allocator, node: *BvhNode, count: usize) void {
+        if (count > 2) {
+            destroyBuilt(alloc, node.left.bvh, count / 2);
+            destroyBuilt(alloc, node.right.bvh, count - count / 2);
+            alloc.destroy(node.left);
+            alloc.destroy(node.right);
+        }
+        alloc.destroy(node);
     }
 
-    pub fn boundingBox(self: BvhNode, t0: f64, t1: f64, out: *Aabb) bool {
+    fn sortEntries(entries: []BuildEntry, axis: usize) void {
+        for (1..entries.len) |i| {
+            const key = entries[i];
+            var j = i;
+            while (j > 0 and key.centroid().at(axis) < entries[j - 1].centroid().at(axis)) : (j -= 1) {
+                entries[j] = entries[j - 1];
+            }
+            entries[j] = key;
+        }
+    }
+
+    pub fn hit(self: *const BvhNode, r: Ray, t_min: f64, t_max: f64, rec: *HitRecord) bool {
+        const query = math.AabbRay.init(r);
+        if (self.box.intervalCached(query, t_min, t_max) == null) return false;
+        return self.hitInside(query, t_min, t_max, rec);
+    }
+
+    // The caller already tested this node's box. Reuse the reciprocal directions
+    // and avoid testing the same node box again when descending a BVH edge.
+    fn hitInside(self: *const BvhNode, query: math.AabbRay, t_min: f64, t_max: f64, rec: *HitRecord) bool {
+        if (self.left == self.right) return hitChild(self.left, query, t_min, t_max, rec);
+
+        const left_interval = self.left_box.intervalCached(query, t_min, t_max);
+        const right_interval = self.right_box.intervalCached(query, t_min, t_max);
+        if (left_interval == null) {
+            return right_interval != null and hitChild(self.right, query, t_min, t_max, rec);
+        }
+        if (right_interval == null) return hitChild(self.left, query, t_min, t_max, rec);
+
+        const right_first = right_interval.?.entry < left_interval.?.entry;
+        const near = if (right_first) self.right else self.left;
+        const far = if (right_first) self.left else self.right;
+        const far_entry = if (right_first) left_interval.?.entry else right_interval.?.entry;
+        const hit_near = hitChild(near, query, t_min, t_max, rec);
+        const closest = if (hit_near) rec.t else t_max;
+        // Equality remains eligible: primitive hit intervals are inclusive too.
+        if (far_entry > closest) return hit_near;
+        const hit_far = hitChild(far, query, t_min, closest, rec);
+        return hit_near or hit_far;
+    }
+
+    fn hitChild(child: *Object, query: math.AabbRay, t_min: f64, t_max: f64, rec: *HitRecord) bool {
+        return switch (child.*) {
+            .bvh => |node| node.hitInside(query, t_min, t_max, rec),
+            else => child.hit(query.ray, t_min, t_max, rec),
+        };
+    }
+
+    pub fn boundingBox(self: *const BvhNode, t0: f64, t1: f64, out: *Aabb) bool {
         _ = t0;
         _ = t1;
         out.* = self.box;
         return true;
     }
 };
-
-fn boxCompare(a: *Object, b: *Object, axis: u8) bool {
-    var box_a: Aabb = undefined;
-    var box_b: Aabb = undefined;
-    if (!a.boundingBox(0, 0, &box_a) or !b.boundingBox(0, 0, &box_b)) {
-        return false;
-    }
-    return box_a.min.at(axis) < box_b.min.at(axis);
-}
-
-/// Stable insertion sort over [start, end) by the chosen axis (small lists; the
-/// per-level cost is negligible and this avoids std.sort API churn).
-fn sortObjects(objects: []*Object, start: usize, end: usize, axis: u8) void {
-    var i = start + 1;
-    while (i < end) : (i += 1) {
-        const key = objects[i];
-        var j = i;
-        while (j > start and boxCompare(key, objects[j - 1], axis)) : (j -= 1) {
-            objects[j] = objects[j - 1];
-        }
-        objects[j] = key;
-    }
-}

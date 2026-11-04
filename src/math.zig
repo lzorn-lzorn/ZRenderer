@@ -116,6 +116,23 @@ pub fn refract(uv: Vec3, n: Vec3, etai_over_etat: f64) Vec3 {
     return r_out_perp.add(r_out_parallel);
 }
 
+/// Reused throughout one BVH traversal; transformed rays start a new query.
+pub const AabbRay = struct {
+    ray: Ray,
+    inverse_direction: Vec3,
+
+    pub fn init(ray: Ray) AabbRay {
+        return .{
+            .ray = ray,
+            .inverse_direction = .{
+                .x = if (ray.direction.x == 0) 0 else 1.0 / ray.direction.x,
+                .y = if (ray.direction.y == 0) 0 else 1.0 / ray.direction.y,
+                .z = if (ray.direction.z == 0) 0 else 1.0 / ray.direction.z,
+            },
+        };
+    }
+};
+
 pub const Aabb = struct {
     min: Point3 = .{},
     max: Point3 = .{},
@@ -125,23 +142,43 @@ pub const Aabb = struct {
     }
 
     pub fn hit(self: Aabb, r: Ray, tmin: f64, tmax: f64) bool {
+        return self.interval(r, tmin, tmax) != null;
+    }
+
+    pub const Interval = struct { entry: f64, exit: f64 };
+
+    pub fn interval(self: Aabb, r: Ray, tmin: f64, tmax: f64) ?Interval {
+        return self.intervalCached(AabbRay.init(r), tmin, tmax);
+    }
+
+    /// Closed intervals retain grazing hits and primitive hits at tmax.
+    pub fn intervalCached(self: Aabb, query: AabbRay, tmin: f64, tmax: f64) ?Interval {
         var t_min = tmin;
         var t_max = tmax;
+        if (t_max < t_min) return null;
         var i: usize = 0;
         while (i < 3) : (i += 1) {
-            const inv_dir = 1.0 / r.direction.at(i);
-            var a = (self.min.at(i) - r.origin.at(i)) * inv_dir;
-            var b = (self.max.at(i) - r.origin.at(i)) * inv_dir;
-            if (inv_dir < 0) {
+            const origin = query.ray.origin.at(i);
+            const direction = query.ray.direction.at(i);
+            // Includes negative zero; never evaluate 0 * infinity on a face.
+            if (direction == 0) {
+                if (origin < self.min.at(i) or origin > self.max.at(i)) return null;
+                continue;
+            }
+            const inv_dir = query.inverse_direction.at(i);
+            // Very small nonzero directions can overflow their reciprocal.
+            var a = if (std.math.isFinite(inv_dir)) (self.min.at(i) - origin) * inv_dir else (self.min.at(i) - origin) / direction;
+            var b = if (std.math.isFinite(inv_dir)) (self.max.at(i) - origin) * inv_dir else (self.max.at(i) - origin) / direction;
+            if (direction < 0) {
                 const tmp = a;
                 a = b;
                 b = tmp;
             }
             t_min = @max(t_min, a);
             t_max = @min(t_max, b);
-            if (t_max <= t_min) return false;
+            if (t_max < t_min) return null;
         }
-        return true;
+        return .{ .entry = t_min, .exit = t_max };
     }
 };
 

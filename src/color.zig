@@ -1,3 +1,4 @@
+const std = @import("std");
 const math = @import("math.zig");
 const random = @import("random.zig");
 const material = @import("material.zig");
@@ -33,41 +34,66 @@ pub fn writeColor(out: []u8, pixel: Color, samples_per_pixel: i32) void {
     out[2] = @intFromFloat(256.0 * math.clamp(b, 0.0, 0.999));
 }
 
-/// The main path tracer: importance-samples the light (when present) and the
-/// material's scattering pdf, mixed 50/50.
+/// Iterative path integration. `depth` is the number of scattering events before
+/// roulette starts, NOT a hard path-length cap. `rr` caps survival probability.
+/// Only surviving roulette events divide throughput by their probability.
 pub fn rayColor(r: Ray, background: Color, world: *object.BvhNode, lights: ?*object.Object, depth: i32, rr: f64) Color {
-    var rec: HitRecord = .{};
+    std.debug.assert(rr > 0 and rr < 1);
+    var ray = r;
+    var radiance = Color.init(0, 0, 0);
+    var throughput = Color.init(1, 1, 1);
+    var remaining = @max(depth, 0);
 
-    if (depth < 0 and random.randomDouble() >= rr) return Color.init(0, 0, 0);
-    if (!world.hit(r, 0.001, math.infinity, &rec)) return background;
+    while (true) {
+        var rec: HitRecord = .{};
+        if (!world.hit(ray, 0.001, math.infinity, &rec)) {
+            return radiance.add(throughput.mul(background));
+        }
+        const mat = rec.material.?;
+        radiance = radiance.add(throughput.mul(mat.emitted5(ray, &rec, rec.u, rec.v, rec.p)));
+        var srec: ScatterRecord = .{};
+        if (!mat.scatterSrec(ray, &rec, &srec)) return radiance;
 
-    var srec: ScatterRecord = .{};
-    const emitted = rec.material.?.emitted5(r, &rec, rec.u, rec.v, rec.p);
-    if (!rec.material.?.scatterSrec(r, &rec, &srec)) return emitted;
+        if (srec.is_specular) {
+            throughput = throughput.mul(srec.attenuation);
+            ray = srec.specular_ray;
+        } else {
+            var bsdf_pdf = srec.pdf orelse return radiance;
+            var scattered: Ray = undefined;
+            var weight: f64 = 1;
+            if (lights) |light_obj| {
+                var light_pdf = Pdf{ .hittable = .{ .ptr = light_obj, .o = rec.p } };
+                const mix = Pdf{ .mixture = .{ .p0 = &light_pdf, .p1 = &bsdf_pdf } };
+                const direction = mix.generate();
+                scattered = Ray.init(rec.p, direction, ray.time);
+                const pdf_value = mix.value(direction);
+                if (!(pdf_value > 0) or !std.math.isFinite(pdf_value)) return radiance;
+                weight = mat.scatteringPdf(ray, &rec, scattered) / pdf_value;
+            } else {
+                const direction = bsdf_pdf.generate();
+                scattered = Ray.init(rec.p, direction, ray.time);
+                // Lambertian f*cos and cosine sampling both contain cos/pi.
+                if (mat.* != .lambertian or bsdf_pdf != .cosine) {
+                    const pdf_value = bsdf_pdf.value(direction);
+                    if (!(pdf_value > 0) or !std.math.isFinite(pdf_value)) return radiance;
+                    weight = mat.scatteringPdf(ray, &rec, scattered) / pdf_value;
+                }
+            }
+            if (!(weight > 0) or !std.math.isFinite(weight)) return radiance;
+            throughput = throughput.mul(srec.attenuation).scale(weight);
+            ray = scattered;
+        }
 
-    if (srec.is_specular) {
-        return srec.attenuation.mul(rayColor(srec.specular_ray, background, world, lights, depth - 1, rr)).scale(1.0 / rr);
+        if (!std.math.isFinite(throughput.x) or !std.math.isFinite(throughput.y) or !std.math.isFinite(throughput.z)) return radiance;
+        const contribution = @max(throughput.x, @max(throughput.y, throughput.z));
+        if (contribution <= 0) return radiance;
+        if (remaining > 0) remaining -= 1;
+        if (remaining == 0) {
+            const survival = @min(rr, @max(0.05, contribution));
+            if (random.randomDouble() >= survival) return radiance;
+            throughput = throughput.scale(1.0 / survival);
+        }
     }
-
-    var scattered: Ray = undefined;
-    var pdf_val: f64 = undefined;
-    if (lights) |light_obj| {
-        var light_pdf = Pdf{ .hittable = .{ .ptr = light_obj, .o = rec.p } };
-        var cos_pdf = srec.pdf.?;
-        var mix = Pdf{ .mixture = .{ .p0 = &light_pdf, .p1 = &cos_pdf } };
-        const dir = mix.generate();
-        scattered = Ray.init(rec.p, dir, r.time);
-        pdf_val = mix.value(dir);
-    } else {
-        const cos_pdf = srec.pdf.?;
-        const dir = cos_pdf.generate();
-        scattered = Ray.init(rec.p, dir, r.time);
-        pdf_val = cos_pdf.value(dir);
-    }
-
-    const scattered_color = rayColor(scattered, background, world, lights, depth - 1, rr);
-    const scattering_pdf = rec.material.?.scatteringPdf(r, &rec, scattered);
-    return emitted.add(srec.attenuation.mul(scattered_color).scale(scattering_pdf / (pdf_val * rr)));
 }
 
 /// Legacy path: gradient background, no light sampling.

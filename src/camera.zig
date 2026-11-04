@@ -55,7 +55,16 @@ pub const Camera = struct {
     }
 
     pub fn getRay(self: Camera, s: f64, t: f64) Ray {
-        const rd = random.randomInUnitDisk().scale(self.lens_radius);
+        const lens_x = random.randomDouble();
+        const lens_y = random.randomDouble();
+        const shutter = random.randomDouble();
+        return self.getRaySampled(s, t, lens_x, lens_y, shutter);
+    }
+
+    /// Fixed sample dimensions: concentric disk mapping avoids rejection loops
+    /// which would otherwise consume a varying number of Sobol coordinates.
+    pub fn getRaySampled(self: Camera, s: f64, t: f64, lens_x: f64, lens_y: f64, shutter: f64) Ray {
+        const rd = concentricDisk(lens_x, lens_y).scale(self.lens_radius);
         const offset = self.u.scale(rd.x).add(self.v.scale(rd.y));
         return Ray.init(
             self.origin.add(offset),
@@ -64,10 +73,20 @@ pub const Camera = struct {
                 .add(self.vertical.scale(t))
                 .sub(self.origin)
                 .sub(offset),
-            random.randomDoubleRange(self.time0, self.time1),
+            self.time0 + (self.time1 - self.time0) * shutter,
         );
     }
 };
+
+pub fn concentricDisk(x: f64, y: f64) Vec3 {
+    const sx = 2 * x - 1;
+    const sy = 2 * y - 1;
+    if (sx == 0 and sy == 0) return .{};
+    const use_x = @abs(sx) > @abs(sy);
+    const radius = if (use_x) sx else sy;
+    const theta = if (use_x) (math.pi / 4) * (sy / sx) else (math.pi / 2) - (math.pi / 4) * (sx / sy);
+    return .{ .x = radius * @cos(theta), .y = radius * @sin(theta) };
+}
 
 pub const CameraArgs = struct {
     lookfrom: Point3 = .{},
