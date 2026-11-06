@@ -2,6 +2,8 @@ const std = @import("std");
 const math = @import("math.zig");
 const rng = @import("random.zig");
 const material = @import("material.zig");
+const mesh = @import("mesh.zig");
+const texture = @import("texture.zig");
 
 const Point3 = math.Point3;
 const Vec3 = math.Vec3;
@@ -22,6 +24,8 @@ pub const HitRecord = struct {
     p: Point3 = .{},
     normal: Vec3 = .{},
     material: ?*material.Material = null,
+    // @brief 可选的形状级 alpha 掩码纹理；材质求值时据此计算不透明度。
+    alpha: ?*texture.Texture = null,
 
     // @brief 根据入射方向记录正反面，并使保存的法线朝向入射侧。
     // @param outward_normal 几何体的外向单位法线。
@@ -46,6 +50,8 @@ pub const Object = union(enum) {
     rotate_y: *RotateY,
     constant_medium: *ConstantMedium,
     bvh: *BvhNode,
+    mesh: *mesh.TriangleMesh,
+    instance: *Instance,
 
     // @brief 查询参数闭区间内的命中。
     // @param r 方向不要求归一化的射线。
@@ -68,6 +74,8 @@ pub const Object = union(enum) {
             .rotate_y => |s| s.hit(r, t_min, t_max, rec),
             .constant_medium => |s| s.hit(r, t_min, t_max, rec),
             .bvh => |s| s.hit(r, t_min, t_max, rec),
+            .mesh => |s| s.hit(r, t_min, t_max, rec),
+            .instance => |s| s.hit(r, t_min, t_max, rec),
         };
     }
 
@@ -89,6 +97,8 @@ pub const Object = union(enum) {
             .rotate_y => |s| s.boundingBox(t0, t1, out),
             .constant_medium => |s| s.boundingBox(t0, t1, out),
             .bvh => |s| s.boundingBox(t0, t1, out),
+            .mesh => |s| s.boundingBox(t0, t1, out),
+            .instance => |s| s.boundingBox(t0, t1, out),
         };
     }
 
@@ -227,6 +237,26 @@ pub fn newYzRect(alloc: Allocator, y0: f64, y1: f64, z0: f64, z1: f64, k: f64, m
 fn wrapBvh(alloc: Allocator, node: *BvhNode) Allocator.Error!*Object {
     const o = try alloc.create(Object);
     o.* = .{ .bvh = node };
+    return o;
+}
+
+// @brief 分配三角形网格对象包装；网格所有权仍由调用方/场景分配器管理。
+// @return 新对象或分配错误。
+pub fn buildMesh(alloc: Allocator, m: *mesh.TriangleMesh) Allocator.Error!*Object {
+    const o = try alloc.create(Object);
+    o.* = .{ .mesh = m };
+    return o;
+}
+
+// @brief 分配仿射变换实例包装；借用被包装对象并缓存对象到世界的变换。
+// @return 新对象或分配错误。
+// @notice 实例不支持光源方向采样，PDF 为零、生成方向为占位；主要用于共享网格的重复摆放。
+pub fn buildInstance(alloc: Allocator, ptr: *Object, transform: math.Transform) Allocator.Error!*Object {
+    const inst = try alloc.create(Instance);
+    errdefer alloc.destroy(inst);
+    inst.* = .{ .ptr = ptr, .transform = transform };
+    const o = try alloc.create(Object);
+    o.* = .{ .instance = inst };
     return o;
 }
 
@@ -858,6 +888,56 @@ pub const RotateY = struct {
     }
 };
 
+// @brief 通用仿射变换实例：把世界射线逆变换到对象空间求交，再正变换位置与法线。
+// @notice 非均匀缩放下法线使用逆转置变换，front_face 保持不变。
+// @method **参数保持**：$\mathbf o'\mathbf +t\mathbf d'=A^{-1}(\mathbf o+t\mathbf d)+\mathbf b^{-1}$，参数 t 不变。
+// @method **法线方向**：$(A^{-T}\mathbf n)\cdot(A\mathbf d)=\mathbf n\cdot\mathbf d$，因此入射侧与正面标志不被破坏。
+pub const Instance = struct {
+    ptr: *Object,
+    transform: math.Transform,
+
+    // @brief 逆变换射线求交，再正变换命中位置与法线。
+    pub fn hit(self: Instance, r: Ray, t_min: f64, t_max: f64, rec: *HitRecord) bool {
+        const local = self.transform.toObjectRay(r);
+        if (!self.ptr.hit(local, t_min, t_max, rec)) return false;
+        rec.p = self.transform.applyPoint(rec.p);
+        rec.normal = self.transform.applyNormal(rec.normal);
+        return true;
+    }
+
+    // @brief 变换被包装对象的包围盒八个顶点，构造轴对齐外包盒。
+    pub fn boundingBox(self: Instance, t0: f64, t1: f64, out: *Aabb) bool {
+        var box: Aabb = undefined;
+        if (!self.ptr.boundingBox(t0, t1, &box)) return false;
+        out.* = transformAabb(self.transform, box);
+        return true;
+    }
+};
+
+// @brief 变换包围盒八个角点后取逐分量极值，得到世界空间轴对齐外包盒。
+fn transformAabb(transform: math.Transform, box: Aabb) Aabb {
+    var min = Point3.init(math.infinity, math.infinity, math.infinity);
+    var max = Point3.init(-math.infinity, -math.infinity, -math.infinity);
+    var i: usize = 0;
+    while (i < 2) : (i += 1) {
+        var j: usize = 0;
+        while (j < 2) : (j += 1) {
+            var k: usize = 0;
+            while (k < 2) : (k += 1) {
+                const corner = Point3.init(
+                    if (i == 0) box.min.x else box.max.x,
+                    if (j == 0) box.min.y else box.max.y,
+                    if (k == 0) box.min.z else box.max.z,
+                );
+                const transformed = transform.applyPoint(corner);
+                min = Point3.init(@min(min.x, transformed.x), @min(min.y, transformed.y), @min(min.z, transformed.z));
+                max = Point3.init(@max(max.x, transformed.x), @max(max.y, transformed.y), @max(max.z, transformed.z));
+            }
+        }
+    }
+    return Aabb.init(min, max);
+}
+
 // @brief 均匀参与介质。
 
 // @brief 在封闭边界内按固定密度抽取散射事件。
@@ -1001,15 +1081,17 @@ pub const BvhNode = struct {
         alloc.destroy(node);
     }
 
+    const SortContext = struct { axis: usize };
+
+    // @brief 使用模式击破快速排序按质心坐标划分，使中位分割在大量对象时保持 $O(n\log n)$。
+    // @notice 比较仅依赖质心在选定轴上的坐标，结果是确定性的；不稳定排序只改变相同质心的相对顺序。
     fn sortEntries(entries: []BuildEntry, axis: usize) void {
-        for (1..entries.len) |i| {
-            const key = entries[i];
-            var j = i;
-            while (j > 0 and key.centroid().at(axis) < entries[j - 1].centroid().at(axis)) : (j -= 1) {
-                entries[j] = entries[j - 1];
+        const Sorter = struct {
+            fn lessThan(ctx: SortContext, a: BuildEntry, b: BuildEntry) bool {
+                return a.centroid().at(ctx.axis) < b.centroid().at(ctx.axis);
             }
-            entries[j] = key;
-        }
+        };
+        std.sort.pdq(BuildEntry, entries, SortContext{ .axis = axis }, Sorter.lessThan);
     }
 
     // @brief 先检查根包围盒，再按近侧优先顺序查询最近命中。

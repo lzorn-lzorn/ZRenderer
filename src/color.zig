@@ -54,15 +54,33 @@ fn directLighting(incoming: Ray, rec: *const HitRecord, world: *object.BvhNode, 
     } else if (world.hit(shadow, 0, math.infinity, &hit)) {
         incident = hit.material.?.emitted5(shadow, &hit, hit.u, hit.v, hit.p);
     } else {
-        incident = lights.background;
+        incident = lights.radiance(sample.direction);
     }
     const weight = if (sample.is_delta) 1 else light.powerHeuristic(sample.pdf, mat.bsdfPdf(incoming, rec, sample.direction));
     return f.mul(incident).scale(cosine * weight / sample.pdf);
 }
 
+// @brief 相机主射线首个表面交点的降噪辅助数据（G-buffer）。
+pub const PrimaryHit = struct {
+    albedo: Color = .{},
+    normal: math.Vec3 = .{},
+    depth: f64 = 0,
+    hit: bool = false,
+};
+
 // @brief 统一 BSDF、下一事件估计和 MIS 的非递归路径积分器。
 // @param depth 开始俄罗斯轮盘的散射次数，不是最大反弹数；rr 为存活概率上限。
 // @param lights 恒定环境、面光源以及可选点光源/方向光的只读集合。
+pub fn rayColorLit(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth: i32, rr: f64) Color {
+    return rayColorLitInner(r, world, lights, depth, rr, null);
+}
+
+// @brief 与 rayColorLit 相同，但可选输出主射线首个表面交点的 albedo/normal/depth。
+// @param primary 非空时写入首个命中；供降噪器的联合双边滤波使用。
+pub fn rayColorLitPrimary(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth: i32, rr: f64, primary: ?*PrimaryHit) Color {
+    return rayColorLitInner(r, world, lights, depth, rr, primary);
+}
+
 // @method 路径通量 $\beta\leftarrow\beta f_s|n\cdot\omega|/p_B$，delta 使用其离散权重。
 // @method BSDF 路径命中光源时乘 $w_B=p_B^2/(p_B^2+p_L^2)$，与上一顶点 NEE 的 $w_L$ 互补。
 // @method 相机直接可见发光和 delta 链后的发光权重为一；直接光照在轮盘之前累积。
@@ -72,7 +90,7 @@ fn directLighting(incoming: Ray, rec: *const HitRecord, world: *object.BvhNode, 
 // @method 若 $D<L$，在实际内部位置按 HG 相函数采样，$p_{HG}/q_{HG}=1$；不附加表面余弦或重复乘散射消光。
 // @notice 支持分离闭合抛光物体的均匀体散射及相机初始位于其内部；不支持重叠/嵌套介质或介质内嵌物体。
 // @notice 体积顶点不做穿折射界面的 NEE；必须随机游走至边界离开，因此不对体积方向应用未配对的光源 MIS。
-pub fn rayColorLit(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth: i32, rr: f64) Color {
+fn rayColorLitInner(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth: i32, rr: f64, primary: ?*PrimaryHit) Color {
     std.debug.assert(rr > 0 and rr < 1);
     var ray = r;
     var radiance: Color = .{};
@@ -88,6 +106,18 @@ pub fn rayColorLit(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth:
     while (true) {
         var rec: HitRecord = .{};
         const found = world.hit(ray, 0, math.infinity, &rec);
+        // @notice 首个交点用于降噪 G-buffer；只记录第一次命中的表面属性。
+        if (first_segment and found) {
+            if (primary) |out| {
+                const direction_length = ray.direction.length();
+                out.* = .{
+                    .albedo = rec.material.?.albedo(&rec),
+                    .normal = rec.normal,
+                    .depth = rec.t * direction_length,
+                    .hit = true,
+                };
+            }
+        }
         // @notice 闭合且无嵌入几何时，第一交点背面意味着相机初始处于该介质内部。
         if (first_segment and found and !rec.front_face) active_medium = rec.material.?.interiorMedium();
         first_segment = false;
@@ -111,7 +141,7 @@ pub fn rayColorLit(r: Ray, world: *object.BvhNode, lights: light.Sampler, depth:
                 continue;
             }
         }
-        const emitted = if (found) rec.material.?.emitted5(ray, &rec, rec.u, rec.v, rec.p) else lights.background;
+        const emitted = if (found) rec.material.?.emitted5(ray, &rec, rec.u, rec.v, rec.p) else lights.radiance(ray.direction);
         const emission_weight = if (!previous_uses_mis) 1 else light.powerHeuristic(previous_pdf, lights.pdf(previous_origin, ray.direction, ray.time));
         radiance = radiance.add(throughput.mul(emitted).scale(emission_weight));
         if (!found) return radiance;

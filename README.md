@@ -2,7 +2,9 @@
 
 使用 **Zig 0.17** 编写的 CPU 路径追踪器，在 Windows / Zig **0.17.1** 上验证。
 采用统一 BSDF、GGX 微表面、物理参数薄透镜、表面直接光照采样和 MIS，
-并已接入闭合物体内部的均匀介质随机游走 SSS、真实位移水球，输出 PNG。
+并已接入闭合物体内部的均匀介质随机游走 SSS、真实位移水球、三角形网格系统、
+PLY/OBJ/PBRT 资产导入（含 San Miguel 场景）、EXR 环境贴图重要性采样（IBL）与
+alpha 掩码/薄层透射，输出 PNG。
 当前构建不使用 GPU，不需要 Vulkan SDK；stb 的 C 实现随项目编译。
 
 数学与 API 导航：[表面 BSDF](docs/bsdf.md)、[体积/次表面散射](docs/subsurface.md)、
@@ -29,16 +31,21 @@ zig build run -Doptimize=ReleaseFast -- --width 640 --samples 128 --output previ
 zig build run -Doptimize=ReleaseFast -- --width 640 --samples 256 --no-adaptive --threads 1
 zig build run -Doptimize=ReleaseFast -- --width 640 --f-number 2.8 --iso 100 --exposure -3
 zig build run -Doptimize=ReleaseFast -- --scene materials --width 640 --samples 512 --no-adaptive --output materials-preview.png
+zig build run -Doptimize=ReleaseFast -- --scene sanmiguel --width 640 --samples 64 --denoise --output sanmiguel-preview.png
 ```
 
 `--scene materials` 选择暗色摄影棚，适合观察水与玉石的参考外观；上述预算只是预览，不保证收敛。
+`--scene sanmiguel` 从 `assets/sanmiguel` 导入 PBRT v2 场景（约 250 万三角形、16 万实例化对象）。
+该场景默认自动降到 320×180、32 spp；未显式指定 `--width`/`--samples` 时不会用 8640×100spp。
+环境光来自 `sky.exr`（EXR IBL），树叶/窗纱用 alpha 掩码。
+低样本下噪点明显，建议加 `--denoise`（G-buffer 引导的联合双边降噪，线性域后处理，几乎不增加渲染时间）。
 选择场景不会自动修改输出文件名，建议显式指定 `--output`。
 
 ### 渲染与相机参数
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `--scene random\|materials` | random | 随机球阵列或暗色双球摄影棚 |
+| `--scene random\|materials\|sanmiguel` | random | 随机球阵列、暗色双球摄影棚或 San Miguel 资产 |
 | `--width N` | 8640 | 图像宽度，传感器宽高比 16:9，最小 4 |
 | `--samples N` | 100 | 每像素最大预算，不向上取整 |
 | `--threads N` | 0 | 0 自动，1 仅调用线程，其余为线程上限 |
@@ -48,6 +55,9 @@ zig build run -Doptimize=ReleaseFast -- --scene materials --width 640 --samples 
 | `--relative-error E` | 0.05 | 线性 RGB 相对阈值，不是误差保证 |
 | `--absolute-error E` | 0.002 | 线性 RGB 绝对阈值 |
 | `--rr-depth N` | 5 | 第 N 次散射之后开始轮盘，不是最大深度 |
+| `--denoise` | 未启用 | 线性域 G-buffer 引导的联合双边降噪 |
+| `--denoise-radius N` | 3 | 降噪空间半径，像素 |
+| `--denoise-iterations N` | 2 | 降噪迭代次数 |
 | `--output FILE` | random_scene.png | PNG 路径，父目录必须存在 |
 | `--focal-length MM` | 50 | 镜头焦距，毫米 |
 | `--f-number N` | 8 | 光圈数；改变景深和曝光 |
@@ -106,6 +116,11 @@ Zig 使用 `struct` 和带标签 `union`，没有传统继承式类。
 | [light](src/light.zig) | `Sampler`、`PointLight`、`DistantLight` | 选光概率、方向 PDF、MIS 权重 |
 | [color](src/color.zig) | `rayColorLit`、`spawnRay`、`writeColor` | 表面/体积传输、NEE、MIS、轮盘与显示编码 |
 | [object](src/object.zig) | `Object`、`HitRecord`、`Sphere`、`Capsule`、`BvhNode` | 相交、运动、几何采样、加速结构 |
+| [mesh](src/mesh.zig) | `TriangleMesh`、`Uv`、`buildTriangleMesh` | 三角形网格求交、平滑法线与 UV 插值 |
+| [import](src/import.zig) | `importPly`、`importObj`、`importPbrtScene`、`importSanMiguel` | PLY/OBJ/PBRT v2 资产解析与实例化 |
+| [exr](src/exr.zig) | `loadExr`、`ExrImage` | OpenEXR ZIP 解码（HALF/FLOAT 扫描线） |
+| [environment](src/environment.zig) | `EnvironmentMap`、`Sample` | 等距柱状环境贴图、亮度 CDF 重要性采样 |
+| [denoise](src/denoise.zig) | `denoiseJointBilateral`、`Guide`、`Options` | G-buffer 引导的联合双边降噪 |
 | [texture](src/texture.zig) | `Texture`、`ImageTexture` | 常量、棋盘、Perlin、8 位图片 |
 | [sampling](src/sampling.zig) | `PixelSampler`、`Estimate` | Sobol 随机数字平移、自适应估计 |
 | [math](src/math.zig) | `Vec3`、`Ray`、`Onb`、`AabbRay` | 向量、坐标系和稳健包围盒 |
@@ -286,7 +301,9 @@ zig build test "-Dtest-filter=lighting"
 根测试 [tests](tests/tests.zig) 汇总 [BSDF](tests/bsdf_tests.zig)、[相机](tests/camera_tests.zig)、
 [几何](tests/geometry_tests.zig)、[光照](tests/lighting_tests.zig)、[场景](tests/scene_tests.zig)、
 [BVH](tests/bvh_tests.zig)、[积分器](tests/integrator_tests.zig)、[采样](tests/sampling_tests.zig)、
-[介质](tests/medium_tests.zig)、[SSS 端到端](tests/subsurface_tests.zig) 和 [水球](tests/water_tests.zig) 测试。
+[介质](tests/medium_tests.zig)、[SSS 端到端](tests/subsurface_tests.zig)、[水球](tests/water_tests.zig)、
+[网格](tests/mesh_tests.zig)、[资产导入](tests/import_tests.zig)、[EXR](tests/exr_debug.zig) 和
+[环境贴图](tests/environment_tests.zig) 测试。
 覆盖能量上界、互易性、独立数值求积、VNDF null 概率、TIR、折射权重、光源遮挡、
 相机对焦与实际曝光输出、OOM、线程一致性和 PNG 上下方向。
 统计测试固定种子和样本预算，有明确绝对误差容差，不把参考值直接取自被测 API。
@@ -297,15 +314,17 @@ VS Code 测试配置通过构建脚本链接 stb/libc；不要绕过构建直接
 第三方 stb 头、生成 Vulkan 绑定和版权/许可文本保持原样，防止破坏上游维护和许可证。
 规则见 [注释规范](docs/comments.md)。
 
-本轮完整测试在 Debug、ReleaseSafe、ReleaseFast 下均为 **152/152 通过**。
+本轮完整测试在 Debug、ReleaseSafe、ReleaseFast 下均为 **168/168 通过**。
 实际体散射摄影棚的单线程与四线程 PNG 散列一致；
 [640×360、2048 spp 对照图](.zig-cache/materials-sss-final.png) 已生成并检查（左水右玉，缓存清理后链接失效）。
 预览仍有噪点，不代表收敛。测试、图像及数值限制见 [验证记录](docs/validation.md)，其中旧薄层玉石结果单独标为历史基线。
 
 ## 9. 当前未覆盖的 PBR 能力
 
-- 不支持 PBRT/glTF 导入、三角网格、法线/粗糙度贴图、HDR 纹理环境、光谱渲染。
-- 图片纹理仍是 8 位最近点采样，尚未自动执行 sRGB 解码；本示例材质使用明确的线性常量。
+- 已支持 PBRT v2 场景、PLY/OBJ 网格、仿射实例化、EXR 环境贴图 IBL 与 alpha 掩码/漫透射；不支持 glTF、法线/粗糙度贴图、光谱渲染。
+- 网格为 Möller–Trumbore 求交，大网格自带质心中位分割的三角形 BVH；实例不支持光源方向采样。
+- EXR 支持 ZIP 压缩的 HALF/FLOAT 扫描线 RGB；环境光按亮度 CDF 重要性采样，应用 PBRT `Rotate` 与 `scale`。
+- 图片纹理仍是 8 位最近点采样；alpha 掩码以直线穿过概率做 alpha 混合，`diffusetransmission` 近似为 0.5 透射薄层。
 - 输出仍为 gamma 2.2 的 8 位 PNG 并截断显示范围，无 EXR/HDR 输出或色调映射。
 - 已支持闭合抛光物体内的均匀随机游走 SSS；不支持非均匀/一般场景体积、RGB 独立散射率、粗糙折射、嵌套/相交介质或内部嵌入其他物体。
 - `Isotropic`/`ConstantMedium` 是旧兼容路径，不是主积分器此次新增体积支持的入口；使用 `newSubsurface`。

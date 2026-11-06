@@ -189,9 +189,11 @@ pub const Surface = struct {
     roughness: f64 = 0.5,
     transmission: f64 = 0,
     anisotropy: f64 = 0,
+    // @brief 不透明度：1 为完全不透明；小于 1 时以 1-opacity 概率直线穿过（alpha 混合）。
+    opacity: f64 = 1,
 
     fn valid(self: Surface) bool {
-        return validColor(self.diffuse) and validUnit(self.roughness) and validUnit(self.transmission) and validUnit(self.anisotropy) and
+        return validColor(self.diffuse) and validUnit(self.roughness) and validUnit(self.transmission) and validUnit(self.anisotropy) and validUnit(self.opacity) and
             (if (self.specular) |f0| validColor(f0) and self.transmission == 0 else true);
     }
 
@@ -223,18 +225,18 @@ pub const Surface = struct {
         const co = wo.dot(n);
         const ci = wi.dot(n);
         if (co <= 0 or ci == 0) return .{};
-        if (ci < 0) return if (self.specular == null) self.diffuse.scale(self.transmission / math.pi) else .{};
+        if (ci < 0) return if (self.specular == null) self.diffuse.scale(self.transmission / math.pi).scale(self.opacity) else .{};
         var diffuse = self.diffuse.scale((1 - self.transmission) / math.pi);
-        const f0 = self.specular orelse return diffuse;
+        const f0 = self.specular orelse return diffuse.scale(self.opacity);
         diffuse = diffuse.mul(white.sub(fresnelBound(f0, co))).mul(white.sub(fresnelBound(f0, ci)));
-        const h = unit(wo.add(wi)) orelse return diffuse;
+        const h = unit(wo.add(wi)) orelse return diffuse.scale(self.opacity);
         var frame: math.Onb = .{};
         frame.buildFromW(n);
         const a = self.alphas();
         const wo_l = local(frame, wo);
         const wi_l = local(frame, wi);
         const spec = fresnelSchlick(f0, wo.dot(h)).scale(distribution(local(frame, h), a.x, a.y) * g1OverCos(wo_l, a.x, a.y) * g1OverCos(wi_l, a.x, a.y) / 4);
-        return diffuse.add(spec);
+        return diffuse.add(spec).scale(self.opacity);
     }
 
     // @brief 完整混合密度，包含选瓣概率；上半球积分可小于 1，余量是 null 概率。
@@ -252,15 +254,15 @@ pub const Surface = struct {
         const co = wo.dot(n);
         const ci = wi.dot(n);
         if (co <= 0 or ci == 0) return 0;
-        if (ci < 0) return if (self.specular == null) self.transmission * -ci / math.pi else 0;
+        if (ci < 0) return if (self.specular == null) self.transmission * -ci / math.pi * self.opacity else 0;
         const p = self.specProbability();
         const diffuse = (1 - p) * (1 - self.transmission) * ci / math.pi;
-        if (p == 0) return diffuse;
-        const h = unit(wo.add(wi)) orelse return diffuse;
+        if (p == 0) return diffuse * self.opacity;
+        const h = unit(wo.add(wi)) orelse return diffuse * self.opacity;
         var frame: math.Onb = .{};
         frame.buildFromW(n);
         const a = self.alphas();
-        return diffuse + p * distribution(local(frame, h), a.x, a.y) * g1OverCos(local(frame, wo), a.x, a.y) / 4;
+        return (diffuse + p * distribution(local(frame, h), a.x, a.y) * g1OverCos(local(frame, wo), a.x, a.y) / 4) * self.opacity;
     }
 
     // @brief 返回世界空间样本；权重使用完整 eval/pdf，而非仅被选中的瓣。
@@ -273,6 +275,10 @@ pub const Surface = struct {
         const wo = unit(wo_in) orelse return null;
         const n = unit(n_in) orelse return null;
         if (wo.dot(n) <= 0) return null;
+        // @brief alpha 混合：以 1-opacity 概率直线穿过表面，不改变方向与通量。
+        if (self.opacity < 1 and random.randomDouble() >= self.opacity) {
+            return .{ .direction = wo.neg(), .weight = white, .pdf = 1 - self.opacity, .is_delta = true };
+        }
         var frame: math.Onb = .{};
         frame.buildFromW(n);
         var wi: Vec3 = undefined;

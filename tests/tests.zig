@@ -20,6 +20,11 @@ test {
     _ = @import("medium_tests.zig");
     _ = @import("water_tests.zig");
     _ = @import("subsurface_tests.zig");
+    _ = @import("mesh_tests.zig");
+    _ = @import("import_tests.zig");
+    _ = @import("exr_debug.zig");
+    _ = @import("environment_tests.zig");
+    _ = @import("denoise_tests.zig");
 }
 
 // @notice Zig 按需分析声明；除入口外，还检查未被使用的公共接口。
@@ -449,4 +454,14 @@ test "sampling options reject invalid values and keep the configured large defau
     try testing.expectError(error.InvalidSamples, Options.parse(&.{ "--samples", "0" }));
     try testing.expectError(error.InvalidWidth, Options.parse(&.{ "--width", "0" }));
     try testing.expectError(error.MissingOptionValue, Options.parse(&.{"--width"}));
+}
+
+test "sanmiguel scene defaults to a small preview resolution unless overridden" {
+    const Options = @import("zrenderer").main.Options;
+    const defaults = try Options.parse(&.{ "--scene", "sanmiguel" });
+    try testing.expectEqual(@as(i32, 320), defaults.image_width);
+    try testing.expectEqual(@as(i32, 32), defaults.samples);
+    const explicit = try Options.parse(&.{ "--scene", "sanmiguel", "--width", "800", "--samples", "64" });
+    try testing.expectEqual(@as(i32, 800), explicit.image_width);
+    try testing.expectEqual(@as(i32, 64), explicit.samples);
 }

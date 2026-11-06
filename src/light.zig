@@ -3,6 +3,7 @@ const math = @import("math.zig");
 const bsdf = @import("bsdf.zig");
 const random = @import("random.zig");
 const object = @import("object.zig");
+const environment = @import("environment.zig");
 const Vec3 = math.Vec3;
 const Color = math.Color;
 
@@ -31,6 +32,7 @@ pub const Sample = struct {
 pub const Sampler = struct {
     area: ?*object.Object = null,
     background: Color = .{},
+    environment: ?*const environment.EnvironmentMap = null,
     sample_environment: bool = false,
     points: []const PointLight = &.{},
     distant: []const DistantLight = &.{},
@@ -48,7 +50,13 @@ pub const Sampler = struct {
     }
 
     fn environmentEnabled(self: Sampler) bool {
-        return self.sample_environment and (self.background.x > 0 or self.background.y > 0 or self.background.z > 0);
+        return self.environment != null or (self.sample_environment and (self.background.x > 0 or self.background.y > 0 or self.background.z > 0));
+    }
+
+    // @brief 查询方向的环境辐亮度：有贴图则查贴图，否则返回恒定背景。
+    pub fn radiance(self: Sampler, direction: Vec3) Color {
+        if (self.environment) |env| return env.radiance(direction);
+        return self.background;
     }
 
     // @brief 形状组、环境各占一个候选，每个 delta 光源各占一个候选。
@@ -57,12 +65,17 @@ pub const Sampler = struct {
     }
 
     // @brief 返回完整连续方向密度；delta 的离散质量不加入方向密度，但计入选光分母。
-    // @method 若候选数为 $K$，则 $p_L(\omega)=\frac1K[p_A(\omega)+\mathbf1_E/(4\pi)]$。
+    // @method 若候选数为 $K$，则 $p_L(\omega)=\frac1K[p_A(\omega)+p_E(\omega)]$。
     // @method 形状组内部还包含自己的选形状概率；与 BSDF 比较时必须使用完整 $p_L$。
     pub fn pdf(self: Sampler, origin: Vec3, direction: Vec3, time: f64) f64 {
         const n = self.count();
         if (n == 0 or bsdf.unit(direction) == null) return 0;
-        var density: f64 = if (self.environmentEnabled()) 1 / (4 * math.pi) else 0;
+        var density: f64 = if (self.environment) |env|
+            env.pdf(direction)
+        else if (self.environmentEnabled())
+            1 / (4 * math.pi)
+        else
+            0;
         if (self.area) |area| density += area.pdfValueAt(origin, direction, time);
         return density / @as(f64, @floatFromInt(n));
     }
@@ -86,6 +99,12 @@ pub const Sampler = struct {
         }
         if (self.environmentEnabled()) {
             if (index == 0) {
+                if (self.environment) |env| {
+                    const env_sample = env.sampleDirection(random.randomDouble(), random.randomDouble());
+                    const density = self.pdf(origin, env_sample.direction, time);
+                    if (!(density > 0) or !std.math.isFinite(density)) return null;
+                    return .{ .direction = env_sample.direction, .pdf = density };
+                }
                 const z = 1 - 2 * random.randomDouble();
                 const phi = 2 * math.pi * random.randomDouble();
                 const r = @sqrt(@max(0, 1 - z * z));

@@ -3,11 +3,16 @@
 pub const bsdf = @import("bsdf.zig");
 pub const camera = @import("camera.zig");
 pub const color = @import("color.zig");
+pub const denoise = @import("denoise.zig");
+pub const environment = @import("environment.zig");
+pub const exr = @import("exr.zig");
+pub const import = @import("import.zig");
 pub const light = @import("light.zig");
 pub const main = @import("main.zig");
 pub const material = @import("material.zig");
 pub const math = @import("math.zig");
 pub const medium = @import("medium.zig");
+pub const mesh = @import("mesh.zig");
 pub const noise = @import("noise.zig");
 pub const object = @import("object.zig");
 pub const pdf = @import("pdf.zig");

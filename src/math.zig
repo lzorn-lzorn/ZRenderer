@@ -281,3 +281,118 @@ pub const Onb = struct {
         self.axis[0] = self.w().cross(self.v());
     }
 };
+
+// @brief 三维仿射变换：对象空间到世界空间的线性部分加平移，并缓存其逆。
+// @notice 线性部分覆盖旋转、均匀/非均匀缩放（含反射）与剪切，不支持透视投影；
+// @notice 法线按逆转置变换以在非均匀缩放下保持正确方向，之后重新归一化。
+pub const Transform = struct {
+    linear: [3][3]f64 = .{ .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 } },
+    inv_linear: [3][3]f64 = .{ .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 } },
+    translation: Vec3 = .{},
+    inv_translation: Vec3 = .{},
+
+    // @brief 返回恒等变换。
+    pub fn identity() Transform {
+        return .{};
+    }
+
+    // @brief 把对象空间点映射到世界空间：$\mathbf p'=A\mathbf p+\mathbf b$。
+    pub fn applyPoint(self: Transform, p: Vec3) Vec3 {
+        const l = self.linear;
+        return Vec3.init(
+            l[0][0] * p.x + l[0][1] * p.y + l[0][2] * p.z + self.translation.x,
+            l[1][0] * p.x + l[1][1] * p.y + l[1][2] * p.z + self.translation.y,
+            l[2][0] * p.x + l[2][1] * p.y + l[2][2] * p.z + self.translation.z,
+        );
+    }
+
+    // @brief 变换方向向量，忽略平移分量。
+    pub fn applyVector(self: Transform, v: Vec3) Vec3 {
+        const l = self.linear;
+        return Vec3.init(
+            l[0][0] * v.x + l[0][1] * v.y + l[0][2] * v.z,
+            l[1][0] * v.x + l[1][1] * v.y + l[1][2] * v.z,
+            l[2][0] * v.x + l[2][1] * v.y + l[2][2] * v.z,
+        );
+    }
+
+    // @brief 用逆转置变换法线并归一化，适配非均匀缩放与反射。
+    // @method **法线变换**：$\mathbf n'=A^{-T}\mathbf n/\|A^{-T}\mathbf n\|$。
+    pub fn applyNormal(self: Transform, n: Vec3) Vec3 {
+        const t = self.inv_linear;
+        const result = Vec3.init(
+            t[0][0] * n.x + t[1][0] * n.y + t[2][0] * n.z,
+            t[0][1] * n.x + t[1][1] * n.y + t[2][1] * n.z,
+            t[0][2] * n.x + t[1][2] * n.y + t[2][2] * n.z,
+        );
+        const len = result.length();
+        return if (len == 0) result else result.div(len);
+    }
+
+    // @brief 把世界空间点映射回对象空间：$A^{-1}\mathbf p+\mathbf b^{-1}$。
+    pub fn toObjectPoint(self: Transform, p: Vec3) Vec3 {
+        const l = self.inv_linear;
+        const q = Vec3.init(
+            l[0][0] * p.x + l[0][1] * p.y + l[0][2] * p.z,
+            l[1][0] * p.x + l[1][1] * p.y + l[1][2] * p.z,
+            l[2][0] * p.x + l[2][1] * p.y + l[2][2] * p.z,
+        );
+        return q.add(self.inv_translation);
+    }
+
+    // @brief 把世界空间方向映射回对象空间。
+    pub fn toObjectVector(self: Transform, v: Vec3) Vec3 {
+        const l = self.inv_linear;
+        return Vec3.init(
+            l[0][0] * v.x + l[0][1] * v.y + l[0][2] * v.z,
+            l[1][0] * v.x + l[1][1] * v.y + l[1][2] * v.z,
+            l[2][0] * v.x + l[2][1] * v.y + l[2][2] * v.z,
+        );
+    }
+
+    // @brief 把世界空间射线变换到对象空间，保持参数 t 不变。
+    // @notice 线性映射下 $\mathbf o'\mathbf + t\mathbf d'=A^{-1}(\mathbf o+t\mathbf d)+\mathbf b^{-1}$，参数一一对应。
+    pub fn toObjectRay(self: Transform, r: Ray) Ray {
+        return Ray.init(self.toObjectPoint(r.origin), self.toObjectVector(r.direction), r.time);
+    }
+};
+
+// @brief 由行主序 4x4 矩阵构造仿射变换；平移位于每行末列。
+// @param m 依次为 $m_{00}\dots m_{33}$，末行须近似 $[0,0,0,1]$。
+// @return 线性部分奇异时返回 null，表示不可逆的退化变换。
+// @method **仿射分解**：$A=[m_{ij}]_{i,j<3}$，$\mathbf b=(m_{03},m_{13},m_{23})$，逆为 $A^{-1}$ 与 $-A^{-1}\mathbf b$。
+pub fn buildAffineTransform(m: [16]f64) ?Transform {
+    const linear = [3][3]f64{
+        .{ m[0], m[1], m[2] },
+        .{ m[4], m[5], m[6] },
+        .{ m[8], m[9], m[10] },
+    };
+    const translation = Vec3.init(m[3], m[7], m[11]);
+    const inv = invert3(linear) orelse return null;
+    const inv_translation = Vec3.init(
+        -(inv[0][0] * translation.x + inv[0][1] * translation.y + inv[0][2] * translation.z),
+        -(inv[1][0] * translation.x + inv[1][1] * translation.y + inv[1][2] * translation.z),
+        -(inv[2][0] * translation.x + inv[2][1] * translation.y + inv[2][2] * translation.z),
+    );
+    return .{
+        .linear = linear,
+        .inv_linear = inv,
+        .translation = translation,
+        .inv_translation = inv_translation,
+    };
+}
+
+// @brief 计算 3x3 矩阵的逆（伴随矩阵除以行列式）；奇异或非有限返回 null。
+// @method **伴随**：$\operatorname{adj}(A)_{ji}=(-1)^{i+j}\det(M_{ij})$，$A^{-1}=\operatorname{adj}(A)/\det A$。
+fn invert3(m: [3][3]f64) ?[3][3]f64 {
+    const det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if (!std.math.isFinite(det) or det == 0) return null;
+    const inv = 1.0 / det;
+    return .{
+        .{ (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv, (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv, (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv },
+        .{ (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv, (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv, (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv },
+        .{ (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv, (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv, (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv },
+    };
+}

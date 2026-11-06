@@ -39,6 +39,26 @@ pub fn newSolid(alloc: Allocator, c: Color) Allocator.Error!*Texture {
     return t;
 }
 
+// @brief 从文件加载图像纹理并包装为 Texture；像素缓冲由 stb 分配，须由场景统一 deinit。
+// @param filename 以零结尾的输入路径；srgb 控制 gamma 2.2 线性化。
+// @param wrap_repeat 为真时纹理坐标周期平铺。
+// @return 新纹理或分配/加载失败；失败自动清理已分配包装。
+pub fn loadImage(alloc: Allocator, filename: [*:0]const u8, srgb: bool, wrap_repeat: bool) !*Texture {
+    const img = try alloc.create(ImageTexture);
+    img.* = ImageTexture.load(filename, srgb, wrap_repeat);
+    if (img.data == null) {
+        alloc.destroy(img);
+        return error.LoadFailed;
+    }
+    const t = alloc.create(Texture) catch |err| {
+        img.deinit();
+        alloc.destroy(img);
+        return err;
+    };
+    t.* = .{ .image = img };
+    return t;
+}
+
 // @brief 分配由两种常量颜色交替组成的棋盘纹理。
 // @param c1 偶数区域颜色；c2 为奇数区域颜色。
 // @return 包含两个子纹理的新包装或分配错误；失败时清理已分配资源。
@@ -103,17 +123,29 @@ pub const PerlinNoiseTexture = struct {
 
 // @brief 拥有 stb 解码像素缓冲的三通道图像纹理。
 // @notice 浅拷贝不转移所有权，不能对共享同一缓冲的副本重复释放。
+// @notice srgb 为真时按 gamma 2.2 线性化解码；wrap_repeat 为真时纹理坐标周期平铺。
 pub const ImageTexture = struct {
     data: ?[*]u8 = null,
     width: i32 = 0,
     height: i32 = 0,
     bytes_per_scanline: i32 = 0,
     bytes_per_pixel: i32 = 3,
+    srgb: bool = false,
+    wrap_repeat: bool = false,
 
     // @brief 从以零结尾的文件路径加载紧密排列的 RGB 图像。
     // @return 成功时保存 stb 缓冲；失败时记录空数据并输出诊断。
+    // @notice 兼容入口：不使用 sRGB 解码并钳位纹理坐标。
     pub fn init(filename: [*:0]const u8) ImageTexture {
-        var self = ImageTexture{};
+        return load(filename, false, false);
+    }
+
+    // @brief 按显式解码与平铺策略加载图像。
+    // @param filename 以零结尾的输入路径；srgb 控制 gamma 2.2 线性化。
+    // @param wrap_repeat 为真时纹理坐标取小数平铺，否则钳位到 [0,1]。
+    // @return 成功时保存 stb 缓冲；失败时记录空数据并输出诊断。
+    pub fn load(filename: [*:0]const u8, srgb: bool, wrap_repeat: bool) ImageTexture {
+        var self = ImageTexture{ .srgb = srgb, .wrap_repeat = wrap_repeat };
         var comp: c_int = self.bytes_per_pixel;
         self.data = stb.stbi_load(filename, &self.width, &self.height, &comp, self.bytes_per_pixel);
         if (self.data == null) {
@@ -131,27 +163,39 @@ pub const ImageTexture = struct {
         self.* = .{};
     }
 
-    // @brief 钳位纹理坐标、翻转 v 后最近邻取样；位置 p 不参与求值。
-    // @return 归一化字节颜色；数据缺失时返回青色，不进行色彩空间线性化。
+    // @brief 翻转 v 后最近邻取样；位置 p 不参与求值。
+    // @return 归一化字节颜色，可选 sRGB 线性化；数据缺失时返回青色。
     pub fn value(self: ImageTexture, u_in: f64, v_in: f64, p: Point3) Color {
         _ = p;
         if (self.data == null) return Color.init(0, 1, 1);
 
-        const u = math.clamp(u_in, 0.0, 1.0);
-        const v = 1.0 - math.clamp(v_in, 0.0, 1.0);
+        const u = if (self.wrap_repeat) wrapFraction(u_in) else math.clamp(u_in, 0.0, 1.0);
+        const v = 1.0 - (if (self.wrap_repeat) wrapFraction(v_in) else math.clamp(v_in, 0.0, 1.0));
 
         var i: i32 = @intFromFloat(u * @as(f64, @floatFromInt(self.width)));
         var j: i32 = @intFromFloat(v * @as(f64, @floatFromInt(self.height)));
         if (i >= self.width) i = self.width - 1;
         if (j >= self.height) j = self.height - 1;
 
-        const color_scale = 1.0 / 255.0;
         const offset: usize = @intCast(j * self.bytes_per_scanline + i * self.bytes_per_pixel);
         const pixel = self.data.? + offset;
         return Color.init(
-            color_scale * @as(f64, @floatFromInt(pixel[0])),
-            color_scale * @as(f64, @floatFromInt(pixel[1])),
-            color_scale * @as(f64, @floatFromInt(pixel[2])),
+            decodeByte(pixel[0], self.srgb),
+            decodeByte(pixel[1], self.srgb),
+            decodeByte(pixel[2], self.srgb),
         );
     }
 };
+
+// @brief 把任意纹理坐标映射到 [0,1) 的小数部分，实现周期平铺。
+fn wrapFraction(v: f64) f64 {
+    const f = v - @floor(v);
+    return f;
+}
+
+// @brief 将字节分量归一化，并按需做 gamma 2.2 线性化解码。
+// @notice 与 writeColor 的 gamma 2.2 输出编码互逆；不是严格 sRGB 传递函数。
+fn decodeByte(byte: u8, srgb: bool) f64 {
+    const c = @as(f64, @floatFromInt(byte)) / 255.0;
+    return if (srgb) math.pow(c, 2.2) else c;
+}

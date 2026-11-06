@@ -7,6 +7,9 @@ const color_mod = @import("color.zig");
 const stb = @import("stb.zig");
 const sampling = @import("sampling.zig");
 const light = @import("light.zig");
+const texture = @import("texture.zig");
+const environment = @import("environment.zig");
+const denoise = @import("denoise.zig");
 
 const Color = math.Color;
 const Camera = camera.Camera;
@@ -20,10 +23,16 @@ pub const Scene = struct {
     world: object.ObjectGroup,
     light: ?*object.Object = null,
     bvh: *object.BvhNode = undefined,
+    images: std.ArrayList(*texture.ImageTexture) = .empty,
 
     // @brief 创建空场景，借用名称切片并保存分配器。
     pub fn init(alloc: Allocator, name: []const u8) Scene {
-        return .{ .alloc = alloc, .name = name, .world = object.ObjectGroup.init(alloc) };
+        return .{
+            .alloc = alloc,
+            .name = name,
+            .world = object.ObjectGroup.init(alloc),
+            .images = .empty,
+        };
     }
 
     // @brief 追加借用对象；列表扩容失败时返回错误。
@@ -31,10 +40,23 @@ pub const Scene = struct {
         try self.world.add(obj);
     }
 
+    // @brief 登记一张由 stb 分配的图像纹理，供 deinit 统一释放像素缓冲。
+    // @notice 图像纹理包装本身仍由场景分配器管理，此处只释放内部像素缓冲。
+    pub fn addImage(self: *Scene, image: *texture.ImageTexture) !void {
+        try self.images.append(self.alloc, image);
+    }
+
     // @brief 为非空场景建立覆盖时间 [0,1] 的 BVH。
     // @return 无效对象范围、缺失包围盒或分配失败时返回错误。
     pub fn buildBvh(self: *Scene) object.BvhNode.BuildError!void {
         self.bvh = try object.BvhNode.init(self.alloc, self.world.list.items, 0, self.world.list.items.len, 0, 1);
+    }
+
+    // @brief 释放所有登记的 stb 图像像素缓冲；几何、材质和包装仍由场景分配器统一回收。
+    // @notice 在场景分配器销毁前调用；重复调用安全（deinit 会重置各图像）。
+    pub fn deinit(self: *Scene) void {
+        for (self.images.items) |image| image.deinit();
+        self.images.deinit(self.alloc);
     }
 };
 
@@ -89,11 +111,15 @@ pub const RenderParams = struct {
     adaptive: bool = true,
     min_samples: u32 = 16,
     absolute_error: f64 = 0.002,
-    // @brief 可选独立光源与恒定环境重要性采样；切片在所有工作线程退出前保持有效。
+    // @brief 可选独立光源与恒定/贴图环境重要性采样；切片在所有工作线程退出前保持有效。
     point_lights: []const light.PointLight = &.{},
     distant_lights: []const light.DistantLight = &.{},
+    environment: ?*const environment.EnvironmentMap = null,
     sample_environment: bool = false,
     relative_error: f64 = 0.05,
+    // @brief 线性域 G-buffer 引导的联合双边降噪；需主射线首个命中数据.
+    denoise: bool = false,
+    denoise_options: denoise.Options = .{},
     // @notice 可选的调用者自有统计输出，仅在全部工作线程汇合后写入。
     stats: ?*RenderStats = null,
 };
@@ -121,7 +147,7 @@ pub fn renderPixels(
         !std.math.isFinite(params.relative_error) or params.absolute_error < 0 or params.relative_error < 0)
         return error.InvalidRenderParams;
 
-    if (!(light.Sampler{ .area = lights, .background = params.background, .points = params.point_lights, .distant = params.distant_lights }).valid() or
+    if (!(light.Sampler{ .area = lights, .background = params.background, .environment = params.environment, .points = params.point_lights, .distant = params.distant_lights }).valid() or
         !std.math.isFinite(params.cam.exposure_scale) or params.cam.exposure_scale <= 0)
         return error.InvalidRenderParams;
 
@@ -131,6 +157,11 @@ pub fn renderPixels(
     if (stride > std.math.maxInt(c_int)) return error.InvalidRenderParams;
     const data = try alloc.alloc(u8, try std.math.mul(usize, stride, h));
     errdefer alloc.free(data);
+    const pixel_count = try std.math.mul(usize, w, h);
+    const linear = try alloc.alloc(Color, pixel_count);
+    defer alloc.free(linear);
+    const gbuffer = try alloc.alloc(denoise.Guide, pixel_count);
+    defer alloc.free(gbuffer);
 
     // @notice 未位移的 Sobol 坐标只依赖样本序号，与像素无关。
     // @notice 缓存最多占 80 KiB；超大预算中的后续基础点按需计算。
@@ -147,7 +178,8 @@ pub fn renderPixels(
         .params = params,
         .world = world,
         .lights = lights,
-        .data = data,
+        .linear = linear,
+        .gbuffer = gbuffer,
         .width = w,
         .height = h,
         .rows_per_task = rows_per_task,
@@ -179,6 +211,17 @@ pub fn renderPixels(
     };
     if (params.stats) |out| out.* = stats;
     if (params.show_progress) std.debug.print("\rRendering: 100% ({d}/{d} rows), {d:.1} samples/pixel\n", .{ h, h, @as(f64, @floatFromInt(stats.total_samples)) / @as(f64, @floatFromInt(w * h)) });
+
+    if (params.denoise) {
+        if (params.show_progress) std.debug.print("Denoising...\n", .{});
+        try denoise.denoiseJointBilateral(alloc, linear, gbuffer, w, h, params.denoise_options);
+    }
+
+    // @notice 线性图像统一编码为显示字节；writeColor 以 samples=1 避免二次除法。
+    var i: usize = 0;
+    while (i < pixel_count) : (i += 1) {
+        color_mod.writeColor(data[i * 3 ..][0..3], linear[i], 1);
+    }
     return data;
 }
 
@@ -186,7 +229,8 @@ const RenderWork = struct {
     params: RenderParams,
     world: *object.BvhNode,
     lights: ?*object.Object,
-    data: []u8,
+    linear: []Color,
+    gbuffer: []denoise.Guide,
     width: usize,
     height: usize,
     rows_per_task: usize,
@@ -222,7 +266,16 @@ const RenderWork = struct {
         var row_samples: u64 = 0;
         var early_stopped: u64 = 0;
         for (0..self.width) |i| {
-            const sampler = sampling.PixelSampler.init(params.seed, @intCast(row * self.width + i), params.sampler);
+            const idx = row * self.width + i;
+            const sampler = sampling.PixelSampler.init(params.seed, @intCast(idx), params.sampler);
+            const light_sampler = light.Sampler{
+                .area = self.lights,
+                .background = params.background,
+                .environment = params.environment,
+                .points = params.point_lights,
+                .distant = params.distant_lights,
+                .sample_environment = params.sample_environment,
+            };
             var estimate: sampling.Estimate = .{};
             while (estimate.count < max_samples) {
                 const sequence_index = estimate.count / sampling.replicas;
@@ -232,20 +285,21 @@ const RenderWork = struct {
                 const u = (@as(f64, @floatFromInt(i)) + sample[0]) / @as(f64, @floatFromInt(self.width));
                 const v = (@as(f64, @floatFromInt(j)) + sample[1]) / @as(f64, @floatFromInt(self.height));
                 const r = params.cam.getRaySampled(u, v, sample[2], sample[3], sample[4]);
-                const radiance = color_mod.rayColorLit(r, self.world, .{
-                    .area = self.lights,
-                    .background = params.background,
-                    .points = params.point_lights,
-                    .distant = params.distant_lights,
-                    .sample_environment = params.sample_environment,
-                }, params.min_bounce, params.rr);
+                // @notice 仅首个样本输出 G-buffer，避免每样本额外开销。
+                var primary: color_mod.PrimaryHit = .{};
+                const radiance = if (estimate.count == 0)
+                    color_mod.rayColorLitPrimary(r, self.world, light_sampler, params.min_bounce, params.rr, &primary)
+                else
+                    color_mod.rayColorLit(r, self.world, light_sampler, params.min_bounce, params.rr);
+                if (estimate.count == 0) {
+                    self.gbuffer[idx] = .{ .albedo = primary.albedo, .normal = primary.normal, .depth = primary.depth, .hit = primary.hit };
+                }
                 estimate.add(radiance.scale(params.cam.sampleWeight(u, v)));
                 if (params.adaptive and estimate.converged(params.min_samples, params.absolute_error, params.relative_error)) break;
             }
             row_samples += estimate.count;
             if (estimate.count < max_samples) early_stopped += 1;
-            const idx = (row * self.width + i) * 3;
-            color_mod.writeColor(self.data[idx..][0..3], estimate.sum, @intCast(estimate.count));
+            self.linear[idx] = estimate.sum.scale(1.0 / @as(f64, @floatFromInt(estimate.count)));
         }
         _ = self.total_samples.fetchAdd(row_samples, .monotonic);
         _ = self.early_stopped_pixels.fetchAdd(early_stopped, .monotonic);

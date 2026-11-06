@@ -36,6 +36,8 @@ pub const Material = union(enum) {
     silk: *Silk,
     translucent: *Translucent,
     subsurface: *Subsurface,
+    coated: *Coated,
+    diffuse_transmission: *DiffuseTransmission,
 
     // @brief 旧版四参数散射；新材质仅通过新 BSDF 接口散射。
     pub fn scatter(self: Material, r_in: Ray, rec: *const HitRecord, attenuation: *Color, scattered: *Ray) bool {
@@ -45,7 +47,7 @@ pub const Material = union(enum) {
             .dielectric => |m| m.scatter(r_in, rec, attenuation, scattered),
             .isotropic => |m| m.scatter(r_in, rec, attenuation, scattered),
             .diffuse_light => |m| m.scatter(r_in, rec, attenuation, scattered),
-            .pbr, .silk, .translucent, .subsurface => false,
+            .pbr, .silk, .translucent, .subsurface, .coated, .diffuse_transmission => false,
         };
     }
 
@@ -78,7 +80,7 @@ pub const Material = union(enum) {
     // @brief 是否含连续表面散射瓣；相函数与发光材质不在该接口内。
     pub fn hasNonDelta(self: Material) bool {
         return switch (self) {
-            .lambertian, .pbr, .silk, .translucent => true,
+            .lambertian, .pbr, .silk, .translucent, .coated, .diffuse_transmission => true,
             .metal => |m| m.fuzz > 0,
             else => false,
         };
@@ -93,9 +95,17 @@ pub const Material = union(enum) {
         };
     }
 
+    // @brief 返回命中点的漫反射反照率，供降噪 G-buffer 使用；不含镜面、透射与发光。
+    // @notice 发光/介电/镜面材质没有稳定漫反射基底时返回黑色。
+    pub fn albedo(self: Material, rec: *const HitRecord) Color {
+        const s = self.surface(rec) orelse return Color.init(0, 0, 0);
+        return s.diffuse;
+    }
+
     // @brief 将材质映射为连续闭包；纹理反照率必须为有限的 [0,1] 颜色。
+    // @notice 命中记录的 alpha 掩码纹理决定表面不透明度，供直线穿过 alpha 混合使用。
     fn surface(self: Material, rec: *const HitRecord) ?bsdf.Surface {
-        return switch (self) {
+        var result: ?bsdf.Surface = switch (self) {
             .lambertian => |m| blk: {
                 const c = m.albedo.value(rec.u, rec.v, rec.p);
                 if (!bsdf.validColor(c)) break :blk null;
@@ -121,8 +131,29 @@ pub const Material = union(enum) {
                 .{ .diffuse = m.color, .transmission = m.transmission }
             else
                 null,
+            .coated => |m| blk: {
+                if (!m.valid()) break :blk null;
+                const c = m.reflectance.value(rec.u, rec.v, rec.p);
+                if (!bsdf.validColor(c)) break :blk null;
+                const r = (m.ior - 1) / (m.ior + 1);
+                const f0 = Color.init(r * r, r * r, r * r);
+                break :blk .{ .diffuse = c, .specular = f0, .roughness = m.roughness };
+            },
+            .diffuse_transmission => |m| blk: {
+                if (!m.valid()) break :blk null;
+                const c = m.transmittance.value(rec.u, rec.v, rec.p);
+                if (!bsdf.validColor(c)) break :blk null;
+                break :blk .{ .diffuse = c, .transmission = 0.5 };
+            },
             else => null,
         };
+        if (result) |*s| {
+            if (rec.alpha) |alpha_tex| {
+                const a = alpha_tex.value(rec.u, rec.v, rec.p);
+                s.opacity = math.clamp((a.x + a.y + a.z) / 3.0, 0.0, 1.0);
+            }
+        }
+        return result;
     }
 
     // @brief 返回世界空间方向 wi 的 BSDF 值，不含余弦。
@@ -331,6 +362,52 @@ pub fn newTranslucent(alloc: Allocator, color: Color, transmission: f64) CreateE
     m.* = .{ .color = color, .transmission = transmission };
     const mat = try alloc.create(Material);
     mat.* = .{ .translucent = m };
+    return mat;
+}
+
+// @brief 带纹理反照率的粗糙涂层材质：漫反射纹理加电介质 F0 的 GGX 镜面瓣。
+// @notice 用于 PBRT 的 coateddiffuse；roughness 为感知粗糙度，F0 由电介质 IOR 决定。
+pub const Coated = struct {
+    reflectance: *Texture,
+    roughness: f64,
+    ior: f64 = 1.5,
+
+    fn valid(self: Coated) bool {
+        return validTexture(self.reflectance) and bsdf.validUnit(self.roughness) and bsdf.validIor(self.ior);
+    }
+};
+
+// @brief 分配带纹理反照率的涂层材质；镜面 F0 取电介质 IOR 反射率。
+// @return 调用方拥有 Coated 与 Material；非法参数或分配失败返回错误。
+pub fn createCoated(alloc: Allocator, reflectance: *Texture, roughness: f64, ior: f64) CreateError!*Material {
+    if (!validTexture(reflectance) or !bsdf.validUnit(roughness) or !bsdf.validIor(ior)) return error.InvalidParameter;
+    const m = try alloc.create(Coated);
+    errdefer alloc.destroy(m);
+    m.* = .{ .reflectance = reflectance, .roughness = roughness, .ior = ior };
+    const mat = try alloc.create(Material);
+    mat.* = .{ .coated = m };
+    return mat;
+}
+
+// @brief 带纹理的漫透射材质：反照率纹理加 0.5 透射比例的薄层双面漫散射。
+// @notice 用于 PBRT 的 diffusetransmission；透射比例固定为 0.5，近似薄叶双面散射。
+pub const DiffuseTransmission = struct {
+    transmittance: *Texture,
+
+    fn valid(self: DiffuseTransmission) bool {
+        return validTexture(self.transmittance);
+    }
+};
+
+// @brief 分配带纹理的漫透射材质；反照率取自透射纹理。
+// @return 调用方拥有 DiffuseTransmission 与 Material；非法纹理或分配失败返回错误。
+pub fn createDiffuseTransmission(alloc: Allocator, transmittance: *Texture) CreateError!*Material {
+    if (!validTexture(transmittance)) return error.InvalidParameter;
+    const m = try alloc.create(DiffuseTransmission);
+    errdefer alloc.destroy(m);
+    m.* = .{ .transmittance = transmittance };
+    const mat = try alloc.create(Material);
+    mat.* = .{ .diffuse_transmission = m };
     return mat;
 }
 
