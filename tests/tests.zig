@@ -293,7 +293,8 @@ test "parallel PNG covers every row with red above blue" {
     for (0..6) |row| {
         for (0..5) |column| {
             const offset = (row * 5 + column) * 3;
-            const expected: [3]u8 = if (row < 3) .{ 255, 0, 0 } else .{ 0, 0, 255 };
+            // @notice 发光值为 1.0，经 ACES 色调映射（acesFilm(1)=0.8038）后再 gamma 2.2 得 231。
+            const expected: [3]u8 = if (row < 3) .{ 231, 0, 0 } else .{ 0, 0, 231 };
             try testing.expectEqualSlices(u8, &expected, image.data.?[offset..][0..3]);
         }
     }

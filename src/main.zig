@@ -36,8 +36,7 @@ pub const Options = struct {
     exposure_compensation: f64 = 0,
     // @brief 线性域联合双边降噪与强度参数；默认关闭，开启后消耗内存做一次后处理。
     denoise: bool = false,
-    denoise_radius: i32 = 3,
-    denoise_iterations: u32 = 2,
+    denoise_scales: u32 = 5,
 
     // @brief 解析并验证数值；物理相机还会校验对焦距离与焦距之间的关系。
     // @param args 不包含可执行文件路径的参数切片。
@@ -62,16 +61,11 @@ pub const Options = struct {
                 options.adaptive = false;
             } else if (std.mem.eql(u8, args[i], "--denoise")) {
                 options.denoise = true;
-            } else if (std.mem.eql(u8, args[i], "--denoise-radius")) {
+            } else if (std.mem.eql(u8, args[i], "--denoise-scales")) {
                 i += 1;
                 if (i == args.len) return error.MissingOptionValue;
-                options.denoise_radius = std.fmt.parseInt(i32, args[i], 10) catch return error.InvalidDenoiseRadius;
-                if (options.denoise_radius < 0 or options.denoise_radius > 32) return error.InvalidDenoiseRadius;
-            } else if (std.mem.eql(u8, args[i], "--denoise-iterations")) {
-                i += 1;
-                if (i == args.len) return error.MissingOptionValue;
-                options.denoise_iterations = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidDenoiseIterations;
-                if (options.denoise_iterations == 0 or options.denoise_iterations > 8) return error.InvalidDenoiseIterations;
+                options.denoise_scales = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidDenoiseScales;
+                if (options.denoise_scales == 0 or options.denoise_scales > 8) return error.InvalidDenoiseScales;
             } else if (std.mem.eql(u8, args[i], "--focal-length") or std.mem.eql(u8, args[i], "--f-number") or
                 std.mem.eql(u8, args[i], "--focus-distance") or std.mem.eql(u8, args[i], "--shutter") or
                 std.mem.eql(u8, args[i], "--iso") or std.mem.eql(u8, args[i], "--exposure"))
@@ -175,9 +169,8 @@ const usage = "Usage: zrenderer [options]\n" ++
     "  --rr-depth N    Start roulette after N scatters (default 5)\n" ++
     "  --sampler sobol|random  Camera sampler (default sobol)\n" ++
     "  --no-adaptive  Always use exactly --samples samples\n" ++
-    "  --denoise      Enable G-buffer guided joint bilateral denoise\n" ++
-    "  --denoise-radius N      Spatial radius in pixels, 0..32 (default 5)\n" ++
-    "  --denoise-iterations N  Denoise iterations, 1..8 (default 2)\n" ++
+    "  --denoise      Enable G-buffer guided a-trous wavelet denoise\n" ++
+    "  --denoise-scales N     Multi-scale levels, 1..8 (default 5)\n" ++
     "  --relative-error E  Relative error tolerance (default 0.05)\n" ++
     "  --absolute-error E  Linear RGB absolute tolerance (default 0.002)\n" ++
     "  --output FILE   PNG path; parent directory must exist\n" ++
@@ -265,7 +258,7 @@ pub fn main(init: std.process.Init) !void {
         .relative_error = options.relative_error,
         .absolute_error = options.absolute_error,
         .denoise = options.denoise,
-        .denoise_options = .{ .radius = options.denoise_radius, .iterations = options.denoise_iterations },
+        .denoise_options = .{ .scales = options.denoise_scales },
     };
 
     std.debug.print("Render set done.\n", .{});

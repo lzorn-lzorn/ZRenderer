@@ -70,10 +70,22 @@ pub fn sobolPoint(index: u32) SobolPoint {
     return result;
 }
 
-// @brief 保存单个像素的种子及八个副本的逐维数字位移。
-// @method **数字位移**：$u_{i,r,d}=[(x_{i,d}\oplus\Delta_{r,d})+1/2]/2^{32}$；异或不是实数加法平移。
-// @method 固定副本内共享位移，保留二进制分层结构；不同副本的位移由散列分别派生，按伪随机独立副本建模。
-// @notice 中点偏移使坐标严格位于 (0,1)；这里不是逐位嵌套扰乱，也没有独立性的数学保证。
+// @brief 哈希 Owen 加扰（Brent Burley）：反位 + Laine-Karras 可逆混合 + 反位 + 数字位移。
+// @method Sobol 根反演是最高位优先，先反位使 Laine-Karras 混合具备前缀保持性，再反位回来。
+// @method seed 随像素/副本/维度变化，既做逐维去相关，又做逐像素数字位移。
+fn owenScramble(value: u32, seed: u32) u32 {
+    var x = @bitReverse(value);
+    x ^= x *% 0x6c50b47c;
+    x ^= x *% 0xb82f1e52;
+    x ^= x *% 0xc7afe638;
+    x ^= x *% 0x8d22f6e6;
+    return @bitReverse(x) ^ seed;
+}
+
+// @brief 保存单个像素的种子及八个副本的逐维 Owen 加扰种子。
+// @method **Owen 加扰**：$u_{i,r,d}=[\mathrm{perm}(x_{i,d},\Delta_{r,d})+1/2]/2^{32}$，其中 perm 为 Laine-Karras 双射置换。
+// @method 固定副本内共享加扰种子，保留二进制分层结构；不同副本的种子由散列分别派生，按伪随机独立副本建模。
+// @notice 中点偏移使坐标严格位于 (0,1)；加扰打破维度相关性，比纯 XOR 数字位移的层内分布更均匀。
 pub const PixelSampler = struct {
     mode: Sampler,
     pixel_seed: u64,
@@ -109,7 +121,7 @@ pub const PixelSampler = struct {
         for (&result, 0..) |*value, d| {
             value.* = switch (self.mode) {
                 .random => random.randomDouble(),
-                .sobol => (@as(f64, @floatFromInt(point[d] ^ self.shifts[sample % replicas][d])) + 0.5) / 4294967296.0,
+                .sobol => (@as(f64, @floatFromInt(owenScramble(point[d], self.shifts[sample % replicas][d]))) + 0.5) / 4294967296.0,
             };
         }
         return result;

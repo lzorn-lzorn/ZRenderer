@@ -413,7 +413,7 @@ test "lighting renderPixels applies physical exposure to analytical NEE before g
         // @notice 独立编码参考不调用 sampleWeight 或 writeColor，且所有通道远离裁剪阈值。
         for (pixels, 0..) |value, i| {
             const linear = rho.at(i % 3) * 0.4 * @exp2(ev);
-            const expected: u8 = @intFromFloat(256 * std.math.pow(f64, linear, 1.0 / 2.2));
+            const expected: u8 = @intFromFloat(256 * std.math.pow(f64, color.acesFilm(linear), 1.0 / 2.2));
             try testing.expectEqual(expected, value);
         }
     }

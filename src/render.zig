@@ -117,9 +117,9 @@ pub const RenderParams = struct {
     environment: ?*const environment.EnvironmentMap = null,
     sample_environment: bool = false,
     relative_error: f64 = 0.05,
-    // @brief 线性域 G-buffer 引导的联合双边降噪；需主射线首个命中数据.
+    // @brief 线性域 G-buffer 引导的多尺度 à-trous 小波降噪；需主射线首个命中数据.
     denoise: bool = false,
-    denoise_options: denoise.Options = .{},
+    denoise_options: denoise.AtrousOptions = .{},
     // @notice 可选的调用者自有统计输出，仅在全部工作线程汇合后写入。
     stats: ?*RenderStats = null,
 };
@@ -214,7 +214,7 @@ pub fn renderPixels(
 
     if (params.denoise) {
         if (params.show_progress) std.debug.print("Denoising...\n", .{});
-        try denoise.denoiseJointBilateral(alloc, linear, gbuffer, w, h, params.denoise_options);
+        try denoise.denoiseAtrous(alloc, linear, gbuffer, w, h, params.denoise_options);
     }
 
     // @notice 线性图像统一编码为显示字节；writeColor 以 samples=1 避免二次除法。

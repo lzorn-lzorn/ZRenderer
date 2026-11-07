@@ -9,18 +9,33 @@ const Color = math.Color;
 const Ray = math.Ray;
 const HitRecord = object.HitRecord;
 
-// @brief 将线性 RGB 平均值编码为显示字节；先处理非法值，避免幂函数和整数转换出错。
+// @brief 将线性 RGB 平均值编码为显示字节：先 ACES 色调映射，再做 gamma 2.2。
 // @param samples_per_pixel 实际累积样本数；out 至少包含三个字节。
-// @notice 保留旧版 gamma=2.2 输出；不是色调映射或严格 sRGB 编码。
+// @notice 色调映射把高动态范围平滑压到 [0,1]，避免高光被硬裁成纯白。
 pub fn writeColor(out: []u8, pixel: Color, samples_per_pixel: i32) void {
     std.debug.assert(samples_per_pixel > 0 and out.len >= 3);
     const scale = 1.0 / @as(f64, @floatFromInt(samples_per_pixel));
     for (0..3) |i| {
         const linear = pixel.at(i) * scale;
-        const safe = if (std.math.isNan(linear) or linear <= 0) 0 else @min(linear, 1);
-        const encoded = if (safe == 0) 0 else math.pow(safe, 1.0 / 2.2);
+        const safe = if (std.math.isNan(linear) or linear < 0) 0 else linear;
+        const tonemapped = acesFilm(safe);
+        const encoded = if (tonemapped <= 0) 0 else math.pow(tonemapped, 1.0 / 2.2);
         out[i] = @intFromFloat(256 * math.clamp(encoded, 0, 0.999));
     }
+}
+
+// @brief ACES 电影色调映射（Stephen Hill 拟合曲线），把线性 HDR 平滑映射到 [0,1]。
+// @notice 高光按渐近线滚向 1.0 而不是硬裁，保留亮部层次。
+pub fn acesFilm(x: f64) f64 {
+    if (!std.math.isFinite(x)) return if (x < 0) 0 else 1;
+    const a = 2.51;
+    const b = 0.03;
+    const c = 2.43;
+    const d = 0.59;
+    const e = 0.14;
+    const num = x * (a * x + b);
+    const den = x * (c * x + d) + e;
+    return math.clamp(num / den, 0.0, 1.0);
 }
 
 // @brief 沿几何法线偏移射线起点，偏移方向由目标方向所在半球确定。

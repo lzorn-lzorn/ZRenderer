@@ -38,7 +38,7 @@ zig build run -Doptimize=ReleaseFast -- --scene sanmiguel --width 640 --samples 
 `--scene sanmiguel` 从 `assets/sanmiguel` 导入 PBRT v2 场景（约 250 万三角形、16 万实例化对象）。
 该场景默认自动降到 320×180、32 spp；未显式指定 `--width`/`--samples` 时不会用 8640×100spp。
 环境光来自 `sky.exr`（EXR IBL），树叶/窗纱用 alpha 掩码。
-低样本下噪点明显，建议加 `--denoise`（G-buffer 引导的联合双边降噪，线性域后处理，几乎不增加渲染时间）。
+低样本下噪点明显，建议加 `--denoise`（G-buffer 引导的多尺度 à-trous 小波降噪，含火焰点截断，线性域后处理，几乎不增加渲染时间）。
 选择场景不会自动修改输出文件名，建议显式指定 `--output`。
 
 ### 渲染与相机参数
@@ -55,9 +55,8 @@ zig build run -Doptimize=ReleaseFast -- --scene sanmiguel --width 640 --samples 
 | `--relative-error E` | 0.05 | 线性 RGB 相对阈值，不是误差保证 |
 | `--absolute-error E` | 0.002 | 线性 RGB 绝对阈值 |
 | `--rr-depth N` | 5 | 第 N 次散射之后开始轮盘，不是最大深度 |
-| `--denoise` | 未启用 | 线性域 G-buffer 引导的联合双边降噪 |
-| `--denoise-radius N` | 3 | 降噪空间半径，像素 |
-| `--denoise-iterations N` | 2 | 降噪迭代次数 |
+| `--denoise` | 未启用 | 线性域 G-buffer 引导的多尺度 à-trous 小波降噪 |
+| `--denoise-scales N` | 5 | 降噪多尺度层数，1~8，越大越平滑 |
 | `--output FILE` | random_scene.png | PNG 路径，父目录必须存在 |
 | `--focal-length MM` | 50 | 镜头焦距，毫米 |
 | `--f-number N` | 8 | 光圈数；改变景深和曝光 |
@@ -114,13 +113,13 @@ Zig 使用 `struct` 和带标签 `union`，没有传统继承式类。
 | [water](src/water.zig) | `WavySphere` | 静态隐式位移曲面、解析几何法线和有界求根 |
 | [bsdf](src/bsdf.zig) | `Surface`、`Sample` | `eval/pdf/sample`、GGX VNDF、Fresnel |
 | [light](src/light.zig) | `Sampler`、`PointLight`、`DistantLight` | 选光概率、方向 PDF、MIS 权重 |
-| [color](src/color.zig) | `rayColorLit`、`spawnRay`、`writeColor` | 表面/体积传输、NEE、MIS、轮盘与显示编码 |
+| [color](src/color.zig) | `rayColorLit`、`spawnRay`、`writeColor`、`acesFilm` | 表面/体积传输、NEE、MIS、轮盘与 ACES 显示编码 |
 | [object](src/object.zig) | `Object`、`HitRecord`、`Sphere`、`Capsule`、`BvhNode` | 相交、运动、几何采样、加速结构 |
 | [mesh](src/mesh.zig) | `TriangleMesh`、`Uv`、`buildTriangleMesh` | 三角形网格求交、平滑法线与 UV 插值 |
 | [import](src/import.zig) | `importPly`、`importObj`、`importPbrtScene`、`importSanMiguel` | PLY/OBJ/PBRT v2 资产解析与实例化 |
 | [exr](src/exr.zig) | `loadExr`、`ExrImage` | OpenEXR ZIP 解码（HALF/FLOAT 扫描线） |
 | [environment](src/environment.zig) | `EnvironmentMap`、`Sample` | 等距柱状环境贴图、亮度 CDF 重要性采样 |
-| [denoise](src/denoise.zig) | `denoiseJointBilateral`、`Guide`、`Options` | G-buffer 引导的联合双边降噪 |
+| [denoise](src/denoise.zig) | `denoiseAtrous`、`Guide`、`AtrousOptions` | 反照率/光照分离的 à-trous 小波降噪 |
 | [texture](src/texture.zig) | `Texture`、`ImageTexture` | 常量、棋盘、Perlin、8 位图片 |
 | [sampling](src/sampling.zig) | `PixelSampler`、`Estimate` | Sobol 随机数字平移、自适应估计 |
 | [math](src/math.zig) | `Vec3`、`Ray`、`Onb`、`AabbRay` | 向量、坐标系和稳健包围盒 |
@@ -280,8 +279,8 @@ $$
   当前仍为指针式 BVH，构建含插入排序，不适合无上限增加图元，不是 SAH/扁平 BVH。
 - 默认线程数为逻辑 CPU 数，受行块数限制；默认每任务 8 行，调用线程也参与。
 - RNG 按像素和样本播种；同一构建与参数下，线程数/行块调度不改变输出。
-- Sobol 只用于胶片 2D、镜头 2D、快门 1D，八个随机数字平移副本；后续路径使用 PRNG。
-  不是全路径 Sobol 或完整 Owen scrambling；基础点缓存最多 80 KiB。
+- Sobol 只用于胶片 2D、镜头 2D、快门 1D，带哈希 Owen 加扰（反位 + Laine-Karras 混合）的八个副本；后续路径使用 PRNG。
+  不是全路径 Sobol；基础点缓存最多 80 KiB。
 - 八副本的均值估计线性 RGB 误差；需连续两个检查点达标，默认最早 32 spp 停止。
   自适应停止有可选停止偏差及稀有高亮漏检风险，**参考图须关闭**。
 - 轮盘仅除实际存活概率，折射率补偿只用于重要性判断，不额外乘入辐亮度。
@@ -314,7 +313,7 @@ VS Code 测试配置通过构建脚本链接 stb/libc；不要绕过构建直接
 第三方 stb 头、生成 Vulkan 绑定和版权/许可文本保持原样，防止破坏上游维护和许可证。
 规则见 [注释规范](docs/comments.md)。
 
-本轮完整测试在 Debug、ReleaseSafe、ReleaseFast 下均为 **168/168 通过**。
+本轮完整测试在 Debug、ReleaseSafe、ReleaseFast 下均为 **170/170 通过**。
 实际体散射摄影棚的单线程与四线程 PNG 散列一致；
 [640×360、2048 spp 对照图](.zig-cache/materials-sss-final.png) 已生成并检查（左水右玉，缓存清理后链接失效）。
 预览仍有噪点，不代表收敛。测试、图像及数值限制见 [验证记录](docs/validation.md)，其中旧薄层玉石结果单独标为历史基线。
@@ -325,7 +324,7 @@ VS Code 测试配置通过构建脚本链接 stb/libc；不要绕过构建直接
 - 网格为 Möller–Trumbore 求交，大网格自带质心中位分割的三角形 BVH；实例不支持光源方向采样。
 - EXR 支持 ZIP 压缩的 HALF/FLOAT 扫描线 RGB；环境光按亮度 CDF 重要性采样，应用 PBRT `Rotate` 与 `scale`。
 - 图片纹理仍是 8 位最近点采样；alpha 掩码以直线穿过概率做 alpha 混合，`diffusetransmission` 近似为 0.5 透射薄层。
-- 输出仍为 gamma 2.2 的 8 位 PNG 并截断显示范围，无 EXR/HDR 输出或色调映射。
+- 输出为 ACES 电影色调映射 + gamma 2.2 的 8 位 PNG；无 EXR/HDR 输出。
 - 已支持闭合抛光物体内的均匀随机游走 SSS；不支持非均匀/一般场景体积、RGB 独立散射率、粗糙折射、嵌套/相交介质或内部嵌入其他物体。
 - `Isotropic`/`ConstantMedium` 是旧兼容路径，不是主积分器此次新增体积支持的入口；使用 `newSubsurface`。
 - 没有体积 NEE、折射连接或专用焦散求解器。面灯/环境的折射焦散依赖普通路径追踪，可能高噪声；解析 delta 灯的镜面链不受支持。

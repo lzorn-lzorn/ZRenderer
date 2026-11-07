@@ -75,3 +75,62 @@ test "joint bilateral denoise keeps a sharp albedo edge" {
     try testing.expect(left_val < 0.3);
     try testing.expect(right_val > 0.7);
 }
+
+test "a-trous denoise reduces variance on uniform noise" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const width: usize = 32;
+    const height: usize = 32;
+    const image = try alloc.alloc(Color, width * height);
+    const guides = try alloc.alloc(denoise.Guide, width * height);
+    var prng = std.Random.DefaultPrng.init(0x4242);
+    const rnd = prng.random();
+    var sum_before: f64 = 0;
+    for (image, 0..) |*p, i| {
+        const noise = (rnd.float(f64) - 0.5) * 0.2;
+        const v = 0.5 + noise;
+        p.* = Color.init(v, v, v);
+        sum_before += v;
+        guides[i] = .{ .albedo = Color.init(0.5, 0.5, 0.5), .normal = Vec3.init(0, 1, 0), .depth = 5, .hit = true };
+    }
+    const mean_before = sum_before / @as(f64, @floatFromInt(width * height));
+    var var_before: f64 = 0;
+    for (image) |p| {
+        const d = p.x - mean_before;
+        var_before += d * d;
+    }
+    try denoise.denoiseAtrous(alloc, image, guides, width, height, .{ .scales = 4 });
+    var sum_after: f64 = 0;
+    for (image) |p| sum_after += p.x;
+    const mean_after = sum_after / @as(f64, @floatFromInt(width * height));
+    var var_after: f64 = 0;
+    for (image) |p| {
+        const d = p.x - mean_after;
+        var_after += d * d;
+    }
+    try testing.expectApproxEqAbs(mean_before, mean_after, 0.02);
+    try testing.expect(var_after < var_before * 0.4);
+}
+
+test "a-trous denoise removes a firefly spike" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const width: usize = 32;
+    const height: usize = 32;
+    const image = try alloc.alloc(Color, width * height);
+    const guides = try alloc.alloc(denoise.Guide, width * height);
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const i = y * width + x;
+            image[i] = Color.init(0.5, 0.5, 0.5);
+            guides[i] = .{ .albedo = Color.init(0.5, 0.5, 0.5), .normal = Vec3.init(0, 1, 0), .depth = 5, .hit = true };
+        }
+    }
+    const spike = (height / 2) * width + width / 2;
+    image[spike] = Color.init(50, 50, 50);
+    try denoise.denoiseAtrous(alloc, image, guides, width, height, .{ .scales = 3 });
+    // 3x3 中值预滤波应把孤立亮斑压回噪声量级。
+    try testing.expect(image[spike].x < 5);
+}
